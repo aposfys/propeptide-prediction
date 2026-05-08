@@ -1,0 +1,12 @@
+--- src/utils/dataset.py
++++ src/utils/dataset.py
+@@ -484,6 +484,9 @@
+         self.data = data
+         self.names = data.index.tolist()
+ 
++        if 'coordinates' not in data.columns:
++            data['coordinates'] = ''
++
+         coordinate_strings = data['coordinates'].tolist()
+         propeptide_coordinate_strings = data['propeptide_coordinates'].tolist()
+         coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in coordinate_strings]

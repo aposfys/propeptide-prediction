@@ -26,10 +26,10 @@ class LSTMCNN(nn.Module):
         self.ReLU = nn.ReLU()
 
 
-        self.input_dropout = nn.Dropout1d(p=dropout_input)  # keep_prob=0.75
+        self.input_dropout = nn.Dropout2d(p=dropout_input)  # keep_prob=0.75
         self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=n_filters,
                             kernel_size=filter_size, stride=1, padding=filter_size // 2)  # in:20, out=32
-        self.conv1_dropout = nn.Dropout1d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
+        self.conv1_dropout = nn.Dropout2d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
 
         self.biLSTM = nn.LSTM(input_size=n_filters, hidden_size=hidden_size, num_layers=num_lstm_layers,
                             bias=True, batch_first=True, dropout=0.0, bidirectional=True)
@@ -130,29 +130,17 @@ class CRFBaseModel(nn.Module):
         # 2. Transition from None to start of Propeptide
         allowed_state_transitions.append((0, 1))
         allowed_start.append(1)
-        
-        # Allow back-to-back propeptides without gap
-        allowed_state_transitions.append((max_len, 1))
 
         # 3. Propeptide internal sequential transitions (i to i+1)
         for i in range(1, max_len):
             allowed_state_transitions.append((i, i + 1))
             
-            # Skip connections matching label generation: `skip_to_i = (min_len - 2, i)`
-            # In the 51-state model where min_len=5, this is (3, i).
-            # This enables sequences like 1->2->3->49->50 for length 5 targets.
-            if i > min_len - 1:
-                skip_to_i = (min_len - 2, i) 
-                allowed_state_transitions.append(skip_to_i)
-            
-        # 4. Self-loop at pre-last state and last state
-        allowed_state_transitions.append((max_len - 1, max_len))
-        allowed_state_transitions.append((max_len - 1, max_len - 1))
+        # 4. Self-loop at max_len to allow arbitrarily long propeptides
         allowed_state_transitions.append((max_len, max_len))
 
-        # 5. Transitions back to None (0)
-        allowed_state_transitions.append((max_len, 0))
+        # 5. Transitions back to None (0) allowed only after min_len is reached
         for i in range(min_len, max_len + 1):
+            allowed_state_transitions.append((i, 0))
             allowed_end.append(i)
 
         return allowed_state_transitions, allowed_start, allowed_end

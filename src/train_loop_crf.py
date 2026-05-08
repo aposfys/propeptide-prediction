@@ -13,7 +13,9 @@ from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
 from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
 #from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
 from .utils.manuscript_metrics import compute_all_metrics
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
+import warnings
+warnings.simplefilter(action="ignore", category=FutureWarning)
 import torch
 import numpy as np
 import argparse
@@ -22,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
 from fairscale.nn.wrap import enable_wrap, wrap
 
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+device = torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu')
 global_step = 0
 
 
@@ -36,9 +38,9 @@ def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1
     print(f'Loaded data. {len(train_set)} train sequences (p.{train_partitions}), {len(valid_set)} validation sequences (p.{valid_partitions}), {len(test_set)} test sequences (p.{test_partitions}).')
 
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=False, collate_fn=train_set.collate_fn, num_workers=2)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=train_set.collate_fn, num_workers=0)
+    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=0)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=0)
 
     return train_loader, valid_loader, test_loader
 
@@ -50,7 +52,7 @@ def get_model(args: argparse.Namespace):
             input_size = args.embedding_dim,
             num_labels=3 if 'with_propeptides' in args.label_type else 2,
             dropout_input=args.dropout,
-            num_states= 101 if 'with_propeptides' in args.label_type else 51,
+            num_states= 51,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
             filter_size=args.kernel_size, 
@@ -87,38 +89,49 @@ def get_model(args: argparse.Namespace):
     return model
 
 
+def prefetch_embeddings(embeddings_dir: str) -> None:
+    import glob, subprocess
+    files = glob.glob(os.path.join(embeddings_dir, '*.pt'))
+    print(f'Pre-fetching {len(files)} embedding files from {embeddings_dir}...', flush=True)
+    for i, path in enumerate(files):
+        import platform
+        if platform.system() == 'Darwin':  # macOS only
+            subprocess.run(['brctl', 'download', path], capture_output=True)
+        if (i + 1) % 500 == 0:
+            print(f'  {i + 1}/{len(files)}', flush=True)
+    print('Pre-fetch complete.', flush=True)
+
+
+def set_random_seed(seed: int):
+    """Set all random seeds for reproducibility."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[int] = [3], test_partitions: List[int] = [4], is_initiated: bool = False):
+    set_random_seed(args.seed)
     global global_step
     global_step = 0
+    # prefetch_embeddings(args.embeddings_dir)  # macOS-only, disabled on Linux
     train_loader, valid_loader, test_loader = get_dataloaders(args, train_partitions, valid_partitions, test_partitions)
 
 
     if not is_initiated:
         # when we run in nested CV, we need to do this outside of train() to avoid reinitialization errors.
         url = "tcp://localhost:12355"
-        torch.distributed.init_process_group(backend="nccl", init_method = url, world_size=1, rank=0)
-
-
-    # initialize the model with FSDP wrapper
-    fsdp_params = dict(
-        mixed_precision=False,
-        flatten_parameters=False,
-        state_dict_device=torch.device("cpu"),  # reduce GPU mem usage
-        move_params_to_cpu =True,  # enable cpu offloading
-        move_grads_to_cpu = True,
-    )
+        # torch.distributed.init_process_group(backend="nccl", init_method = url, world_size=1, rank=0)
 
     model = get_model(args)
-
-    # NOTE FSDP does not support non-trainable weights yet. CRF has some.
-    # https://github.com/pytorch/pytorch/issues/75943
-    model = FSDP(model, **fsdp_params)
-
+    model = model.to(device)
 
     model.feature_extractor.biLSTM.flatten_parameters()
-    # model = get_model(args)
-    # model.to(device)
-    optimizer = Adam(model.parameters(), lr = args.lr)
+    optimizer = AdamW(model.parameters(), lr = args.lr, weight_decay=1e-2)
     writer = SummaryWriter(args.out_dir)
 
     previous_best = -100000000000
@@ -138,13 +151,13 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
 
-        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}')
+        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f} | F1 Propeptide: {valid_metrics["f1 propeptides"]:.4f}')
 
-        stopping_metric = (valid_metrics['f1 peptides'] + valid_metrics['f1 propeptides'])/2#(valid_metrics['F1 +- 3 peptide'] + valid_metrics['F1 +- 3 propeptide'])/2
+        stopping_metric = valid_metrics['f1 propeptides']
         if stopping_metric > previous_best:
             previous_best = stopping_metric
             best_val_metrics = valid_metrics
-            pickle.dump((valid_probs, valid_preds, valid_labels, valid_loader.dataset.names), open(os.path.join(args.out_dir, 'valid_outputs.pickle'), 'wb'))
+            #pickle.dump((valid_probs, valid_preds, valid_labels, valid_loader.dataset.names), open(os.path.join(args.out_dir, 'valid_outputs.pickle'), 'wb'))
             valid_metrics['epoch'] = epoch # keep track of best early stopping.
             json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
             torch.save(model.state_dict(), os.path.join(args.out_dir, 'model.pt'))
@@ -153,7 +166,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
             # valid_metrics['epoch'] = epoch # keep track of best early stopping.
             # json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics_old.json'), 'w'), indent=2)
     
-    model.load_state_dict(torch.load(os.path.join(args.out_dir, 'model.pt')))
+    model.load_state_dict(torch.load(os.path.join(args.out_dir, 'model.pt'), weights_only=False))
     test_loss, test_probs, test_preds, test_peptides, test_labels = run_dataloader(test_loader, model, optimizer, writer, do_train=False)
     #test_metrics = compute_crf_metrics(test_probs, test_preds, test_peptides, test_labels, organism=test_loader.dataset.data['organism'])
     #test_metrics = metrics_fn(test_peptides, test_preds, test_loader.dataset.data['organism'])
@@ -161,7 +174,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     add_dict_to_writer(test_metrics, writer, global_step, prefix='Test')
     writer.add_scalar('Test/loss', test_loss, global_step=global_step)
     print('Test complete.')
-    pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names), open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
+    #pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names), open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
     json.dump(test_metrics, open(os.path.join(args.out_dir, 'test_metrics.json'), 'w'), indent=2)
 
     return best_val_metrics, test_metrics
@@ -196,14 +209,14 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
         model.zero_grad()
 
         embeddings, mask, label, peptides= batch
-        embeddings = embeddings.to(device)
-        mask = mask.to(device)
-        label = label.to(device)
+        embeddings = embeddings.to(torch.float32).to(device)
+        mask = mask.to(torch.float32).to(device)
+        label = label.long().to(device)
 
         if do_train:
             pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
-            torch.nn.utils.clip_grad_norm_(model.parameters(),0.25 )
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # FIXED: now after backward(), max_norm 1.0 standard
             optimizer.step()
             writer.add_scalar('Train/loss', loss.item(), global_step=global_step)
             global_step += 1
@@ -234,12 +247,13 @@ def parse_arguments():
     p.add_argument('--data_file', '-df', type=str, help='Sequences with Graph-Part headers', default = 'data/uniprot_12052022_cv_5_50/labeled_sequences.csv')
     p.add_argument('--partitioning_file', '-pf', type=str, help='Graph-Part output. Assume train-val-test split.', default = 'data/uniprot_12052022_cv_5_50/graphpart_assignments.csv')
     p.add_argument('--embedding', '-em', type=str, help='Sequence embedding strategy.', default='precomputed')
-    p.add_argument('--embedding_dim', '-ed', type=int, help='Sequence embedding dimension.', default=1280)
+    p.add_argument('--embedding_dim', '-ed', type=int, help='Sequence embedding dimension.', default=1536)
 
     p.add_argument('--model', '-m', type=str, default='lstmcnncrf')
 
     p.add_argument('--out_dir', '-od', type=str, help='name that will be added to the runs folder output', default='train_run')
     p.add_argument('--epochs', type=int, default=30, help='number of times to iterate through all samples')
+    p.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     p.add_argument('--batch_size', '-bs', type=int, default=100, help='samples that will be processed in parallel')
 
     p.add_argument('--lr', type=float, default=1e-4)
