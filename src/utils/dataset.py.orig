@@ -1,156 +1,160 @@
-from bdb import set_trace
-from typing import Any, Sequence, Tuple, List
-
-import torch
-from torch.utils.data import Dataset
-import torch.nn.functional as F
 import os
 import pandas as pd
-from hashlib import md5
 import numpy as np
-
+import torch
+from torch.utils.data import Dataset
+from hashlib import md5
+from typing import Tuple, List, Any, Iterable, Callable
+from .crf_label_utils import peptide_list_to_label_sequence, parse_coordinate_string, peptide_list_to_binary_label_sequence
 
 def make_hashes(names: List[str]) -> List[str]:
-    hashes = []
-    for name in names:
-        hashes.append(md5(name.encode()).digest().hex())
-
-    return hashes
-
-from typing import Iterable, Callable, Any, List
-def filter_lists(filter_condition: Callable[[Any], bool], filter_key_iterable: Iterable[Any] , *additional_iterables: Iterable[Any]) -> List[List[Any]]:
-    """Generic function for filtering a number of equal-length lists based on filter_condition.
-    If an element of filter_key_iterable is in allowed_values, the list entries are retained, else dropped.
-
-    Args:
-        filter_condition (Callable[[Any], bool]): Will be executed on values in `filter_key_iterable`. Retained if returns True.
-        filter_key_iterable (Iterable[Any]): A Iterable of values to be filtered.
-        *additional_iterables (Iterable[Any], optional): More iterables of the same length that should be filtered.
-
-    Returns:
-        List[List[Any]]: The filtered input lists. [filter_key_iterable, *additional_iterables]
-    """
-    out_list = []
-
-    for values in zip(filter_key_iterable, *additional_iterables):
-        if filter_condition(values[0]):
-            out_list.append(values)
-    #if filtering condition leaves 0 elements, reconstructing the correct number of lists via zip will fail.
-    if len(out_list) == 0:
-        return [list() for x in range(len(additional_iterables)+1)]
-    else:
-        return [list(x) for x in zip(*out_list)]
-
-
-    
-
+    return [md5(name.encode()).digest().hex() for name in names]
 
 class PrecomputedCSVDataset(Dataset):
-    '''Use together with modified extract.py script. Retrieves seqs via md5 hash.'''
-    def __init__(
-        self, 
-        embeddings_dir: str, 
-        data_file: str, 
-        partitioning_file: str, 
-        partitions: List[int]=[0], 
-        label_type: str = 'binary',
-        ):
-        """
-        Dataset to hold fasta files with precomputed embeddings.
-        Can also parse graph-part partition assignments.
-
-
-        Args:
-            embeddings_dir (str): Directory containing precomputed embeddings produced by `extract.py`
-            csv_file (str): csv with sequences, labels and other metadata.
-            partitioning_file (str): Graph-Part output for `fasta_file`. Defaults to None.
-            partitions (List[int], optional): Partitions to retain. Defaults to [0].
-        """
-
+    '''Original dataset class - kept for import compatibility'''
+    def __init__(self, embeddings_dir, data_file, partitioning_file, partitions=[0], label_type='binary'):
         super().__init__()
         self.embeddings_dir = embeddings_dir
-
-
         data = pd.read_csv(data_file, index_col='protein_id')
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
         data = data.join(partitioning)
         data = data.loc[data['cluster'].isin(partitions)]
-        self.data = data
-
-        self.names = data.index.tolist() # don't want to bother with pandas indexing here.
-
-        self.label_type = label_type
-
-        if label_type == 'binary':
-            self.labels = data['is_peptide'].tolist()
-        elif label_type == 'start_stop':
-            self.labels = data['start_stop'].tolist()
-        elif label_type == 'cleavage_sites':
-            # simplify the start-stop labels. treat all sites as simple cleavage sites.
-            labels = data['start_stop'].str.replace('2','1').str.replace('3','1').tolist() # 1 start, 2 end, 3 both
-            self.labels = ['0'+x[1:-1] +'0' for x in labels] # start and end positions fo protein are never CS, also when there is a peptide.
-        elif label_type == 'intensity':
-            labels =  data['intensity'].str.split(';')
-            self.labels = labels.apply(lambda x: [float(y) for y in x]).tolist()
-        
-        else:
-            raise NotImplementedError(label_type)
-
+        self.data, self.names, self.label_type = data, data.index.tolist(), label_type
+        if label_type == 'binary': self.labels = data['is_peptide'].tolist()
+        elif label_type == 'start_stop': self.labels = data['start_stop'].tolist()
         self.sequences = data['sequence'].tolist()
-        self.organism = data['organism'].tolist()
         self.hashes = make_hashes(self.sequences)
-        
-        if 'tissue' in data.columns:
-            tissues = data['tissue'].astype('category')
-            self.tissues = tissues.cat.codes.tolist()
-            self.tissue_names = tissues.cat.categories.tolist()
-        else:
-            self.tissues = np.ones(len(self.organism))
-            self.tissue_names = ['unknown']
-
-
-    def __len__(self) -> int:
-        return len(self.names)
-
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-
+    def __len__(self): return len(self.names)
+    def __getitem__(self, index):
         seq_hash = self.hashes[index]
-        #print(seq_hash, self.names[index], self.sequences[index])
-        try:
-            embeddings = torch.load(os.path.join(self.embeddings_dir, f'{seq_hash}.pt'))
-        except FileNotFoundError:
-            raise FileNotFoundError(f'Could not find sequence hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.')
-        label = self.labels[index]
+        embeddings = torch.load(os.path.join(self.embeddings_dir, f'{seq_hash}.pt'))
+        label = torch.IntTensor([int(x) for x in self.labels[index]])
+        return embeddings, torch.ones(embeddings.shape[0]), label, 1
+    @staticmethod
+    def collate_fn(batch):
+        embeddings, masks, labels, tissues = zip(*batch)
+        return torch.nn.utils.rnn.pad_sequence(embeddings, batch_first=True).permute(0,2,1), \
+               torch.nn.utils.rnn.pad_sequence(masks, batch_first=True), \
+               torch.nn.utils.rnn.pad_sequence(labels, batch_first=True), \
+               torch.LongTensor(tissues)
 
-        if self.label_type == 'intensity':
-            label = np.array(label)
-            np.log(label, where=label>0, out=label) # applies in-place to all >0.
-            label = torch.FloatTensor(label)
-            # if label.isnan().sum()>0:
-            #     import ipdb; ipdb.set_trace()
+class BLOSUMCSVDataset(Dataset):
+    '''BLOSUM dataset class - kept for import compatibility'''
+    def __init__(self, data_file, partitioning_file, partitions=[0], label_type='binary'):
+        super().__init__()
+        data = pd.read_csv(data_file, index_col='protein_id')
+        partitioning = pd.read_csv(partitioning_file, index_col='AC')
+        data = data.join(partitioning).loc[data['cluster'].isin(partitions)]
+        self.names, self.labels, self.sequences = data.index.tolist(), data['is_peptide'].tolist(), data['sequence'].tolist()
+    def __len__(self): return len(self.names)
+    @staticmethod
+    def collate_fn(batch):
+        e, m, l, t = zip(*batch)
+        return torch.nn.utils.rnn.pad_sequence(e, batch_first=True).permute(0,2,1), \
+               torch.nn.utils.rnn.pad_sequence(m, batch_first=True), \
+               torch.nn.utils.rnn.pad_sequence(l, batch_first=True), torch.LongTensor(t)
 
-        else:
-            label = torch.IntTensor([int(x) for x in label])
+class PrecomputedCSVForCRFDataset(Dataset):
+    '''Standard CRF dataset class - kept for import compatibility'''
+    def __init__(self, embeddings_dir, data_file, partitioning_file, partitions=[0], label_type='simple'):
+        super().__init__()
+        self.embeddings_dir = embeddings_dir
+        data = pd.read_csv(data_file, index_col='protein_id')
+        partitioning = pd.read_csv(partitioning_file, index_col='AC')
+        data = data.join(partitioning).loc[data['cluster'].isin(partitions)].fillna('')
+        self.names, self.sequences = data.index.tolist(), data['sequence'].tolist()
+        self.hashes = make_hashes(self.sequences)
+        self.peptides = [parse_coordinate_string(x) for x in data['coordinates']]
+        self.labels = [peptide_list_to_binary_label_sequence(p, len(s)) for p, s in zip(self.peptides, self.sequences)]
+    def __len__(self): return len(self.names)
+    def __getitem__(self, index):
+        embeddings = torch.load(os.path.join(self.embeddings_dir, f'{self.hashes[index]}.pt'))
+        return embeddings, torch.ones(embeddings.shape[0]), torch.from_numpy(self.labels[index]), self.peptides[index]
+    @staticmethod
+    def collate_fn(batch):
+        e, m, l, p = zip(*batch)
+        return torch.nn.utils.rnn.pad_sequence(e, batch_first=True).permute(0,2,1), \
+               torch.nn.utils.rnn.pad_sequence(m, batch_first=True), \
+               torch.nn.utils.rnn.pad_sequence(l, batch_first=True), p
 
-        # mask : batch_size, seq_len
-        mask = torch.ones(embeddings.shape[0])
+class PrecomputedCSVForOverlapCRFDataset(Dataset):
+    """    Consolidated fixed class for Propeptide-only task """
+    def __init__(self, embeddings_dir, data_file, partitioning_file, partitions=[0], label_type=None):
+        super().__init__()
+        self.embeddings_dir = embeddings_dir
+    
+     # Load and Filter
+        data = pd.read_csv(data_file, index_col='protein_id')
+        partitioning = pd.read_csv(partitioning_file, index_col='AC')
+        data = data.join(partitioning)
+        data = data.loc[data['cluster'].isin(partitions)]
+        data = data.fillna('').infer_objects(copy=False) 
 
-        tissue = self.tissues[index]
+        # --- CRITICAL FIX: Physically remove sequences without propeptides ---
+        data = data[data['propeptide_coordinates'] != '']
+        # ---------------------------------------------------------------------
+    self.data = data
+        self.names = data.index.tolist() 
+        if 'coordinates' not in data.columns:
+            data['coordinates'] = ''
+        if 'coordinates' not in data.columns:
+            data['coordinates'] = ''
 
-        return embeddings, mask, label, tissue
+        if 'coordinates' not in data.columns:
+            data['coordinates'] = ''        
+        
+        coordinate_strings = data['coordinates'].tolist()
+        propeptide_coordinate_strings = data['propeptide_coordinates'].tolist()
+        self.sequences = data['sequence'].tolist()
+        self.hashes = make_hashes(self.sequences)
+        # Parse propeptide coordinates (Mature peptides are ignored/removed)
+        pro_strings = data['propeptide_coordinates'].tolist()
+        self.propeptides = [parse_coordinate_string(x, merge_overlaps=False) for x in pro_strings]
+        
+        # Metadata for metrics (Mature peptide slot is empty)
+        self.peptides_metadata = [([], x) for x in self.propeptides] 
+
+    def __len__(self): return len(self.names)
+
+    @staticmethod 
+    def _sample_from_overlapping_peptides(peptide_coordinates, propeptide_coordinates):
+        all_coords = peptide_coordinates + propeptide_coordinates
+        if not all_coords: return [], []
+        
+        starts, ends = zip(*all_coords)
+        types = ['Peptide']*len(peptide_coordinates) + ['Propeptide']*len(propeptide_coordinates)
+        df = pd.DataFrame({'start': starts, 'end': ends, 'type': types})
+        df = df.sort_values(['start', 'end'], ascending=[True, False])
+        df['group'] = (df['end'].cummax().shift() < df['start']).cumsum()
+        
+        pep_keep, pro_keep = [], []
+        for _, group_df in df.groupby('group'):
+            sampled = group_df.sample(1).iloc[0]
+            if sampled['type'] == 'Peptide': pep_keep.append((sampled['start'], sampled['end']))
+            else: pro_keep.append((sampled['start'], sampled['end']))
+        return pep_keep, pro_keep
+
+    def __getitem__(self, index):
+        seq_hash = self.hashes[index]
+        seq_len = len(self.sequences[index])
+        embeddings = torch.load(os.path.join(self.embeddings_dir, f'{seq_hash}.pt')).to(torch.float32)
+        
+        # Mature peptides are passed as empty list to ensure they become State 0
+        _, propeptides = self._sample_from_overlapping_peptides([], self.propeptides[index])
+        
+        # Map Propeptides to State 1-50 ladder
+        pro_label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1, max_len=50) 
+        
+        return embeddings, torch.ones(embeddings.shape[0], dtype=torch.float32), \
+               torch.from_numpy(pro_label).long(), self.peptides_metadata[index]
 
     @staticmethod
-    def collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-
-        embeddings, masks, labels, tissues = zip(*batch)
-        embeddings = torch.nn.utils.rnn.pad_sequence(embeddings, batch_first=True)
-        masks = torch.nn.utils.rnn.pad_sequence(masks, batch_first=True)
-        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True)
-        tissues = torch.LongTensor(tissues)
-
-
-        return embeddings.permute(0,2,1), masks, labels, tissues
-
+    def collate_fn(batch):
+        embeddings, masks, labels, peptides = zip(*batch)
+        return torch.nn.utils.rnn.pad_sequence(embeddings, batch_first=True).permute(0,2,1), \
+               torch.nn.utils.rnn.pad_sequence(masks, batch_first=True), \
+               torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=0), \
+               peptides
 
 BLOSUM_normalized = np.array([[ 0.2901, 0.0310, 0.0256, 0.0297, 0.0216, 0.0256, 0.0405, 0.0783, 0.0148, 0.0432, 0.0594, 0.0445, 0.0175, 0.0216, 0.0297, 0.0850, 0.0499, 0.0054, 0.0175, 0.0688],
                               [ 0.0446, 0.3450, 0.0388, 0.0310, 0.0078, 0.0484, 0.0523, 0.0329, 0.0233, 0.0233, 0.0465, 0.1202, 0.0155, 0.0174, 0.0194, 0.0446, 0.0349, 0.0058, 0.0174, 0.0310],
@@ -224,6 +228,8 @@ class BLOSUMCSVDataset(Dataset):
         data = data.loc[data['cluster'].isin(partitions)]
 
         self.names = data.index.tolist() # don't want to bother with pandas indexing here.
+        if 'coordinates' not in data.columns:
+            data['coordinates'] = ''
 
         if label_type == 'binary':
             self.labels = data['is_peptide'].tolist()
@@ -316,10 +322,12 @@ class PrecomputedCSVForCRFDataset(Dataset):
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
         data = data.join(partitioning)
         data = data.loc[data['cluster'].isin(partitions)]
-        data = data.fillna('') # empty coordinates would become nan.
+        data = data.fillna('').infer_objects(copy=False) # empty coordinates would become nan.
         self.data = data
 
         self.names = data.index.tolist() # don't want to bother with pandas indexing here.
+        if 'coordinates' not in data.columns:
+            data['coordinates'] = ''
 
         self.label_type = label_type
 
@@ -357,6 +365,8 @@ class PrecomputedCSVForCRFDataset(Dataset):
             data = data.loc[~data.index.isin(['P87352', 'Q91082', 'P10645'])]
             self.data = data
             self.names = data.index.tolist()
+            if 'coordinates' not in data.columns:
+                data['coordinates'] = ''
 
             coordinate_strings = data['coordinates'].tolist()
             coordinates = [parse_coordinate_string(x, merge_overlaps=True) for x in coordinate_strings]
@@ -371,6 +381,8 @@ class PrecomputedCSVForCRFDataset(Dataset):
             data = data.loc[~data.index.isin(['P87352', 'Q91082', 'P10645'])]
             self.data = data
             self.names = data.index.tolist()
+            if 'coordinates' not in data.columns:
+                data['coordinates'] = ''
 
             coordinate_strings = data['coordinates'].tolist()
             propeptide_coordinate_strings = data['propeptide_coordinates'].tolist()
@@ -433,9 +445,6 @@ class PrecomputedCSVForCRFDataset(Dataset):
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True)
 
         return embeddings.permute(0,2,1), masks, labels, peptides
-
-
-
 class PrecomputedCSVForOverlapCRFDataset(Dataset):
     '''Use together with modified extract.py script. Retrieves seqs via md5 hash.'''
     def __init__(
@@ -444,22 +453,8 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         data_file: str, 
         partitioning_file: str, 
         partitions: List[int]=[0], 
-        label_type = None, # for compatibility
+        label_type = None, 
         ):
-        """
-        Dataset to hold fasta files with precomputed embeddings.
-        Can also parse graph-part partition assignments.
-        When dealing with overlapping peptides, randomly samples one and uses it for labeling in a iteration.
-        This is much slower than just loading a precomputed label, so use enough workers.
-
-
-        Args:
-            embeddings_dir (str): Directory containing precomputed embeddings produced by `extract.py`
-            csv_file (str): csv with sequences, labels and other metadata.
-            partitioning_file (str): Graph-Part output for `fasta_file`. Defaults to None.
-            partitions (List[int], optional): Partitions to retain. Defaults to [0].
-        """
-
         super().__init__()
         self.embeddings_dir = embeddings_dir
 
@@ -467,110 +462,108 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
         data = data.join(partitioning)
         data = data.loc[data['cluster'].isin(partitions)]
-        data = data.fillna('') # empty coordinates would become nan.
-        self.data = data
-
-        self.names = data.index.tolist() # don't want to bother with pandas indexing here.
-
-        
-        # NOTE self.peptides is 1-based indexing straight from UniProt.
+        data = data.fillna('').infer_objects(copy=False) 
         self.data = data
         self.names = data.index.tolist()
-
+        if 'coordinates' not in data.columns:
+            data['coordinates'] = ''
         if 'coordinates' not in data.columns:
             data['coordinates'] = ''
 
         coordinate_strings = data['coordinates'].tolist()
         propeptide_coordinate_strings = data['propeptide_coordinates'].tolist()
+        
+        # Parse strings into 1-based coordinate lists
         coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in coordinate_strings]
         propeptide_coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in propeptide_coordinate_strings]
 
-        # PROPEPTIDES_ONLY mode: predict propeptides at states 1-50.
-        # Move propeptides into the labeling slot that uses start_state=1.
-        # Keep originals in self.data['true_propeptides'] so metrics work.
-        true_propeptides = propeptide_coordinates  # save for metrics
-        if label_type == 'propeptides_only':
-            coordinates = propeptide_coordinates  # propeptides will be labeled at 1-50
-            propeptide_coordinates = [[] for _ in range(len(coordinates))]  # empty so nothing goes to 51-100
-
-        # NOTE we feed .data to our metrics fn. it expects some more columns.
-        self.data['true_peptides'] = coordinates if label_type != 'propeptides_only' else [[] for _ in range(len(coordinates))]
-        self.data['true_propeptides'] = true_propeptides
-
-        self.peptides_only = coordinates
-        self.propeptides = propeptide_coordinates
-        self.peptides = [(x,y) for x,y, in zip(coordinates, propeptide_coordinates)] # data loading works exactly the same. only metrics computation needs to unpack this.
-
+        self.data['true_peptides'] = coordinates
+        self.data['true_propeptides'] = propeptide_coordinates
+        self.peptides = [(x,y) for x,y, in zip(coordinates, propeptide_coordinates)] 
 
         self.sequences = data['sequence'].tolist()
         self.organism = data['organism'].tolist()
         self.hashes = make_hashes(self.sequences)
-        
+        self._embedding_cache = {}
 
-    def __len__(self) -> int:
-        return len(self.names)
-
-    @staticmethod 
+    @staticmethod
     def _sample_from_overlapping_peptides(peptide_coordinates, propeptide_coordinates):
         '''Finds overlapping groups of peptides. Samples one peptide from each group.'''
         peptides_to_keep = []
         propeptides_to_keep = []
-
-        # https://stackoverflow.com/questions/48243507/group-rows-by-overlapping-ranges
+        
         all_peptides = peptide_coordinates + propeptide_coordinates
-        # Handle empty case: no annotations at all
-        if len(all_peptides) == 0:
-            return peptides_to_keep, propeptides_to_keep
+        
+        # Guard clause: If no peptides or propeptides exist, return empty lists
+        if not all_peptides:
+            return [], []
+
+        # Metadata for sampling
         types = ['Peptide'] * len(peptide_coordinates) + ['Propeptide'] * len(propeptide_coordinates)
         starts, ends = zip(*all_peptides)
 
-        df = pd.DataFrame([starts, ends, types], index = ['start', 'end', 'type']).T
+        df = pd.DataFrame({'start': starts, 'end': ends, 'type': types})
         df = df.sort_values(['start', 'end'], ascending=[True, False])
 
-        df['group'] = (df['end'].cummax().shift() < df['start']).cumsum() # was <= originally. but indexing is inclusive in uniprot.
+        # Identify overlapping groups
+        df['group'] = (df['end'].cummax().shift() < df['start']).cumsum()
         df = df.sort_index()
 
+        # Sample one sequence from each overlapping group
         for group, group_df in df.groupby('group'):
-            peptide = group_df.sample(1).iloc[0] # returns df, but we need the single row
-            if peptide['type'] == 'Peptide':
-                peptides_to_keep.append((peptide['start'], peptide['end']))
+            sampled = group_df.sample(1).iloc[0] 
+            if sampled['type'] == 'Peptide':
+                peptides_to_keep.append((sampled['start'], sampled['end']))
             else:
-                propeptides_to_keep.append((peptide['start'], peptide['end']))
+                propeptides_to_keep.append((sampled['start'], sampled['end']))
 
         return peptides_to_keep, propeptides_to_keep
 
-
+    def __len__(self) -> int:
+        return len(self.names)
 
     def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-
         seq_hash = self.hashes[index]
         seq_len = len(self.sequences[index])
-        try:
-            embeddings = torch.load(os.path.join(self.embeddings_dir, f'{seq_hash}.pt')).to(torch.float32) #esm2 comes as half
-        except FileNotFoundError:
-            raise FileNotFoundError(f'Could not find sequence hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.')
+        
+        if seq_hash in self._embedding_cache:
+            embeddings = self._embedding_cache[seq_hash]
+        else:
+            path = os.path.join(self.embeddings_dir, f'{seq_hash}.pt')
+            for _attempt in range(8):
+                try:
+                    embeddings = torch.load(path, weights_only=False).to(torch.float32)
+                    break
+                except FileNotFoundError:
+                    raise FileNotFoundError(f'Could not find sequence hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.')
+                except (TimeoutError, OSError):
+                    if _attempt == 7:
+                        raise
+                    import time; time.sleep(min(2 ** _attempt, 60))
+            self._embedding_cache[seq_hash] = embeddings
 
-        peptides, propeptides = self.peptides[index]
-        peptides, propeptides = self._sample_from_overlapping_peptides(peptides, propeptides)
+        orig_peptides, orig_propeptides = self.peptides[index]
+        
+        # --- CRITICAL ISOLATION LOGIC ---
+        # Pass an empty list for regular peptides to treat them as background
+        _, propeptides = self._sample_from_overlapping_peptides([], orig_propeptides)
 
-        label = peptide_list_to_label_sequence(peptides, seq_len, max_len = 50) 
-        propeptide_label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=51, max_len=50) 
-        label = label + propeptide_label # numpy arrays with no overlap at nonzero positions so we can just add the two.
+        # Map Propeptides to State 1-50 sequentially.
+        # This prevents illegal jumps (e.g. 3 to 42) because only propeptides exist in the ladder.
+        propeptide_label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1, max_len=50) 
 
+        label = torch.from_numpy(propeptide_label).long() # Long is required for CRF tags
+        mask = torch.ones(embeddings.shape[0], dtype=torch.float32)
 
-        label = torch.from_numpy(label)
-        mask = torch.ones(embeddings.shape[0])
-        peptides = self.peptides[index]
-
-        return embeddings, mask, label, self.peptides[index] # this is for the metrics.
+        return embeddings, mask, label, self.peptides[index] 
 
     @staticmethod
-    def collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[np.ndarray]]:
-
+    def collate_fn(batch):
         embeddings, masks, labels, peptides = zip(*batch)
         embeddings = torch.nn.utils.rnn.pad_sequence(embeddings, batch_first=True)
         masks = torch.nn.utils.rnn.pad_sequence(masks, batch_first=True)
+        # Pad labels with 0 (None state)
+        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=0)
 
-        labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True)
-
+        # permute for CNN: [Batch, Channel, Length]
         return embeddings.permute(0,2,1), masks, labels, peptides

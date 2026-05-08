@@ -1,0 +1,23 @@
+*.pt
+*.pth
+*.csv
+__pycache__/
+# Ignore environments and cache
+.venv/
+__pycache__/
+.claude/
+.DS_Store
+**/.DS_Store
+
+# Ignore large datasets and model weights
+checkpoints/
+embeddings/
+baseline_*/
+*.fasta
+*.csv
+*.csv.original
+*.tsv
+*.json
+
+# Ignore logs
+*.txt

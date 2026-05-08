@@ -13,7 +13,7 @@ class CRFBaseModel(nn.Module):
     def __init__(
         self,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 61 # total number of states in the state space model
+        num_states = 51 # total number of states in the state space model
         ) -> None:
 
 
@@ -29,59 +29,50 @@ class CRFBaseModel(nn.Module):
         self.crf = CRF(num_states, batch_first=True, allowed_transitions=allowed_transitions, allowed_start=allowed_start, allowed_end=allowed_end)
 
     @staticmethod
-    def get_crf_constraints(max_len: int = 60, min_len: int = 5, n_branches: int = 1):
-        '''Build the peptide state space model.
-        Each peptide starts as state 1 and goes through 2, 3.
-        From 3, it can either go to 4 or skip ahead to any other state up to 59.
-        From 59, go to 60. 
-        This enforces a minimum peptide length of 5. Each peptide is forced to end in 60,
-        so this state can learn peptide end properties.
+    def get_crf_constraints(max_len: int = 50, min_len: int = 5, n_branches: int = 1):
         '''
-        allowed_starts = [0,1]
-        allowed_ends = [0, max_len]
-
+        Build the purely binary (Propeptide vs None) state space model.
+        State 0: None/Background
+        States 1 to max_len: Propeptide positions
+        '''
         allowed_state_transitions = []
-        allowed_state_transitions.append((0,0)) # None to None
-        allowed_state_transitions.append((0,1)) # None to Peptide_0
-        allowed_state_transitions.append((max_len,1)) # Peptide_50 to Peptide_0, no need to have 1 AA gap
-        allowed_state_transitions.append((max_len,0)) # Peptide_50 (peptide end position) to None
+        allowed_start = []
+        allowed_end = []
 
-        for i in range(1, max_len): 
-            to_next = (i, i+1)
-            allowed_state_transitions.append(to_next)
+        # 1. State 0 (None) constraints
+        allowed_state_transitions.append((0, 0))
+        allowed_start.append(0)
+        allowed_end.append(0)
 
-            if i >min_len-1: #make skip forward connections
-                skip_to_i = (min_len-2,i) #3
-                allowed_state_transitions.append(skip_to_i) 
+        # 2. Transition from None to start of Propeptide
+        allowed_state_transitions.append((0, 1))
+        allowed_start.append(1)
 
-        allowed_state_transitions.append((max_len-1,max_len)) # peptide end position -1 to peptide end position
-        # logic of this state space model is that the end state is the same for all peptides, regardless their length.
+        # Allow back-to-back propeptides without gap
+        allowed_state_transitions.append((max_len, 1))
 
-        # branch 1 + no state: 0-50
-        # branch 2: 51-101
-        if n_branches == 2:
-            start = 1 + max_len
-            end = 2*max_len
+        # 3. Propeptide internal sequential transitions (i to i+1)
+        for i in range(1, max_len):
+            allowed_state_transitions.append((i, i + 1))
+            
+            # Skip connections matching label generation: `skip_to_i = (min_len - 2, i)`
+            # In the 51-state model where min_len=5, this is (3, i).
+            # This enables sequences like 1->2->3->49->50 for length 5 targets.
+            if i > min_len - 1:
+                skip_to_i = (min_len - 2, i) 
+                allowed_state_transitions.append(skip_to_i)
+            
+        # 4. Self-loop at pre-last state and last state
+        allowed_state_transitions.append((max_len - 1, max_len))
+        allowed_state_transitions.append((max_len - 1, max_len - 1))
+        allowed_state_transitions.append((max_len, max_len))
 
-            allowed_starts.append(start)
-            allowed_ends.append(end)
-            allowed_state_transitions.append((0,start))
-            allowed_state_transitions.append((end,start)) 
-            allowed_state_transitions.append((end,0))
+        # 5. Transitions back to None (0)
+        allowed_state_transitions.append((max_len, 0))
+        for i in range(min_len, max_len + 1):
+            allowed_end.append(i)
 
-            # can go directly from end of peptide to start of propeptide and vice versa.
-            allowed_state_transitions.append((end,1))
-            allowed_state_transitions.append((start-1, start))
-
-            for i in range(start, end): 
-                to_next = (i, i+1)
-                allowed_state_transitions.append(to_next)
-
-                if i >min_len-1: #make skip forward connections
-                    skip_to_i = (start+min_len-3, i)#((min_len-2,i))
-                    allowed_state_transitions.append(skip_to_i) 
-
-        return allowed_state_transitions, allowed_starts, allowed_ends
+        return allowed_state_transitions, allowed_start, allowed_end
 
     def _debug_crf(self, targets):
         '''Check label sequences for incompatibilities with the defined state grammar.'''
@@ -143,9 +134,12 @@ class CRFBaseModel(nn.Module):
     @staticmethod
     def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
 
+        try:
+            from esm import pretrained
+            esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
+        except AttributeError:
+            esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm1b_t33_650M_UR50S")
 
-        from esm import pretrained
-        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
         batch_converter = esm_alphabet.get_batch_converter()
         esm_model.to(device)
 
@@ -257,7 +251,7 @@ class LSTMCNNCRF(CRFBaseModel):
         hidden_size: int = 128,
         num_lstm_layers : int = 1,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 61 # total number of states in the state space model
+        num_states = 51 # total number of states in the state space model
         ) -> None:
 
 
@@ -367,7 +361,7 @@ class SelfAttentionCRF(CRFBaseModel):
         n_heads: int = 4,
         attn_dropout: float = 0.15,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 61 # total number of states in the state space model
+        num_states = 51 # total number of states in the state space model
         ) -> None:
 
 
@@ -378,5 +372,5 @@ class SelfAttentionCRF(CRFBaseModel):
         self.features_to_emissions = nn.Linear(hidden_size, num_labels)
         self.num_states = num_states
 
-        allowed_transitions, allowed_start, allowed_end = self.get_crf_constraints(n_branches=2 if num_labels==3 else 1)
+        allowed_transitions, allowed_start, allowed_end = self.get_crf_constraints(50, 5)
         self.crf = CRF(num_states, batch_first=True, allowed_transitions=allowed_transitions, allowed_start=allowed_start, allowed_end=allowed_end)
