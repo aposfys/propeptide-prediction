@@ -477,25 +477,14 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         self.data = data
         self.names = data.index.tolist()
 
-        if 'coordinates' not in data.columns:
-            data['coordinates'] = ''
-
         coordinate_strings = data['coordinates'].tolist()
         propeptide_coordinate_strings = data['propeptide_coordinates'].tolist()
         coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in coordinate_strings]
         propeptide_coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in propeptide_coordinate_strings]
 
-        # PROPEPTIDES_ONLY mode: predict propeptides at states 1-50.
-        # Move propeptides into the labeling slot that uses start_state=1.
-        # Keep originals in self.data['true_propeptides'] so metrics work.
-        true_propeptides = propeptide_coordinates  # save for metrics
-        if label_type == 'propeptides_only':
-            coordinates = propeptide_coordinates  # propeptides will be labeled at 1-50
-            propeptide_coordinates = [[] for _ in range(len(coordinates))]  # empty so nothing goes to 51-100
-
         # NOTE we feed .data to our metrics fn. it expects some more columns.
-        self.data['true_peptides'] = coordinates if label_type != 'propeptides_only' else [[] for _ in range(len(coordinates))]
-        self.data['true_propeptides'] = true_propeptides
+        self.data['true_peptides'] = coordinates
+        self.data['true_propeptides'] = propeptide_coordinates
 
         self.peptides_only = coordinates
         self.propeptides = propeptide_coordinates
@@ -518,9 +507,6 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
 
         # https://stackoverflow.com/questions/48243507/group-rows-by-overlapping-ranges
         all_peptides = peptide_coordinates + propeptide_coordinates
-        # Handle empty case: no annotations at all
-        if len(all_peptides) == 0:
-            return peptides_to_keep, propeptides_to_keep
         types = ['Peptide'] * len(peptide_coordinates) + ['Propeptide'] * len(propeptide_coordinates)
         starts, ends = zip(*all_peptides)
 

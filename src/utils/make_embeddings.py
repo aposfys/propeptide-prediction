@@ -15,11 +15,7 @@ def hash_aa_string(string):
 
 from tqdm.auto import tqdm
 def generate_esm_embeddings(fasta_file, esm_embeddings_dir, repr_layers=33):
-    try:
-        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D') # esm1b_t33_650M_UR50S
-    except AttributeError:
-        import torch
-        esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm2_t33_650M_UR50D")
+    esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D') # esm1b_t33_650M_UR50S
 
     dataset = FastaBatchedDataset.from_file(fasta_file)
     

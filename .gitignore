@@ -21,3 +21,5 @@ baseline_*/
 
 # Ignore logs
 *.txt
+*.pickle
+train_run/
