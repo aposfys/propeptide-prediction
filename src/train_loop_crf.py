@@ -10,7 +10,8 @@ import os
 from torch.utils.data import DataLoader
 
 from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
-from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
+#from .utils import add_dict_to_writer
+from .utils.dataset import PrecomputedCSVForOverlapCRFDataset
 #from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
 from .utils.manuscript_metrics import compute_all_metrics
 from torch.optim import Adam
@@ -93,10 +94,10 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     train_loader, valid_loader, test_loader = get_dataloaders(args, train_partitions, valid_partitions, test_partitions)
 
 
-    if not is_initiated:
-        # when we run in nested CV, we need to do this outside of train() to avoid reinitialization errors.
-        url = "tcp://localhost:12355"
-        torch.distributed.init_process_group(backend="nccl", init_method = url, world_size=1, rank=0)
+    # if not is_initiated:
+    #     # when we run in nested CV, we need to do this outside of train() to avoid reinitialization errors.
+    #     url = "tcp://localhost:12355"
+    #     torch.distributed.init_process_group(backend="gloo", init_method = url, world_size=1, rank=0)
 
 
     # initialize the model with FSDP wrapper
@@ -110,10 +111,12 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
 
     model = get_model(args)
 
-    # NOTE FSDP does not support non-trainable weights yet. CRF has some.
-    # https://github.com/pytorch/pytorch/issues/75943
-    model = FSDP(model, **fsdp_params)
+    # # NOTE FSDP does not support non-trainable weights yet. CRF has some.
+    # # https://github.com/pytorch/pytorch/issues/75943
+    # model = FSDP(model, **fsdp_params)
 
+
+    model.to(device)  # Ensure model is moved to CPU
 
     model.feature_extractor.biLSTM.flatten_parameters()
     # model = get_model(args)
@@ -134,7 +137,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         #valid_metrics_old = compute_crf_metrics(valid_probs, valid_preds, valid_peptides, valid_labels)#, organism=valid_loader.dataset.data['organism'])
         #valid_metrics = metrics_fn(valid_peptides, valid_preds, valid_loader.dataset.data['organism'])
         valid_metrics = compute_all_metrics(valid_probs, valid_preds, valid_labels, valid_loader.dataset.names, valid_loader.dataset.data, windows = [3])[0]
-        add_dict_to_writer(valid_metrics, writer, global_step, prefix='Valid')
+        #add_dict_to_writer(valid_metrics, writer, global_step, prefix='Valid')
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
 
@@ -158,7 +161,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     #test_metrics = compute_crf_metrics(test_probs, test_preds, test_peptides, test_labels, organism=test_loader.dataset.data['organism'])
     #test_metrics = metrics_fn(test_peptides, test_preds, test_loader.dataset.data['organism'])
     test_metrics = compute_all_metrics(test_probs, test_preds, test_labels, test_loader.dataset.names, test_loader.dataset.data, windows = [3])[0]
-    add_dict_to_writer(test_metrics, writer, global_step, prefix='Test')
+    #add_dict_to_writer(test_metrics, writer, global_step, prefix='Test')
     writer.add_scalar('Test/loss', test_loss, global_step=global_step)
     print('Test complete.')
     pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names), open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
