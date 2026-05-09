@@ -18,11 +18,10 @@ class LSTMCNN(nn.Module):
         self.ReLU = nn.ReLU()
 
 
-        self.input_norm = nn.LayerNorm(input_size)  # Normalize ESM3's high variance (~297) to ~1
-        self.input_dropout = nn.Dropout1d(p=dropout_input)  # keep_prob=0.75 
+        self.input_dropout = nn.Dropout2d(p=dropout_input)  # keep_prob=0.75 
         self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=n_filters,
                             kernel_size=filter_size, stride=1, padding=filter_size // 2) 
-        self.conv1_dropout = nn.Dropout1d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
+        self.conv1_dropout = nn.Dropout2d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
 
         self.biLSTM = nn.LSTM(input_size=n_filters, hidden_size=hidden_size, num_layers=num_lstm_layers,
                             bias=True, batch_first=True, dropout=0.0, bidirectional=True)
@@ -45,8 +44,6 @@ class LSTMCNN(nn.Module):
         '''
         out = embeddings # [batch_size, embeddings_dim, sequence_length]
         seq_lengths = mask.sum(dim=1)
-        # LayerNorm on feature dim: transpose to put features last, normalize, transpose back
-        out = self.input_norm(out.transpose(1, 2)).transpose(1, 2)
         out = self.input_dropout(out)  # 2D feature map dropout
 
         out = self.ReLU(self.conv1(out))  # [batch_size,embeddings_dim,sequence_length] -> [batch_size,32,sequence_length]
@@ -160,12 +157,9 @@ class SequenceTaggingLSTMCNN(nn.Module):
     @staticmethod
     def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
 
-        try:
-            from esm import pretrained
-            esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        except AttributeError:
-            esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm1b_t33_650M_UR50S")
 
+        from esm import pretrained
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
         batch_converter = esm_alphabet.get_batch_converter()
         esm_model.to(device)
 
@@ -232,7 +226,7 @@ class LSTM(nn.Module):
         self.ReLU = nn.ReLU()
 
 
-        self.input_dropout = nn.Dropout1d(p=dropout_input)  # keep_prob=0.75
+        self.input_dropout = nn.Dropout2d(p=dropout_input)  # keep_prob=0.75
 
         self.biLSTM = nn.LSTM(input_size=input_size, hidden_size=hidden_size, num_layers=num_lstm_layers,
                             bias=True, batch_first=True, dropout=0.0, bidirectional=True)
@@ -255,8 +249,6 @@ class LSTM(nn.Module):
         '''
         out = embeddings # [batch_size, embeddings_dim, sequence_length]
         seq_lengths = mask.sum(dim=1)
-        # LayerNorm on feature dim: transpose to put features last, normalize, transpose back
-        out = self.input_norm(out.transpose(1, 2)).transpose(1, 2)
         out = self.input_dropout(out)  # 2D feature map dropout
 
         bilstminput = out.permute(0, 2, 1).float()  # changing []
@@ -304,10 +296,10 @@ class CNN(nn.Module):
         self.ReLU = nn.ReLU()
 
 
-        self.input_dropout = nn.Dropout1d(p=dropout_input)  # keep_prob=0.75
+        self.input_dropout = nn.Dropout2d(p=dropout_input)  # keep_prob=0.75
         self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=n_filters,
                             kernel_size=filter_size, stride=1, padding=filter_size // 2)  # in:20, out=32
-        self.conv1_dropout = nn.Dropout1d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
+        self.conv1_dropout = nn.Dropout2d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
 
         # self.biLSTM = nn.LSTM(input_size=n_filters, hidden_size=hidden_size, num_layers=num_lstm_layers,
         #                     bias=True, batch_first=True, dropout=0.0, bidirectional=True)
@@ -330,8 +322,6 @@ class CNN(nn.Module):
         '''
         out = embeddings # [batch_size, embeddings_dim, sequence_length]
         seq_lengths = mask.sum(dim=1)
-        # LayerNorm on feature dim: transpose to put features last, normalize, transpose back
-        out = self.input_norm(out.transpose(1, 2)).transpose(1, 2)
         out = self.input_dropout(out)  # 2D feature map dropout
 
         out = self.ReLU(self.conv1(out))  # [batch_size,embeddings_dim,sequence_length] -> [batch_size,32,sequence_length]
@@ -440,12 +430,9 @@ class SequenceTaggingLSTM(nn.Module):
     @staticmethod
     def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
 
-        try:
-            from esm import pretrained
-            esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        except AttributeError:
-            esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm1b_t33_650M_UR50S")
 
+        from esm import pretrained
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
         batch_converter = esm_alphabet.get_batch_converter()
         esm_model.to(device)
 
@@ -634,12 +621,9 @@ class SequenceTaggingLSTMCNNCRF(nn.Module):
     @staticmethod
     def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
 
-        try:
-            from esm import pretrained
-            esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        except AttributeError:
-            esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm1b_t33_650M_UR50S")
 
+        from esm import pretrained
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
         batch_converter = esm_alphabet.get_batch_converter()
         esm_model.to(device)
 

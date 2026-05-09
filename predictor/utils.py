@@ -2,9 +2,11 @@ from itertools import groupby
 from collections import defaultdict
 import numpy as np
 from typing import List, Tuple
+from esm import pretrained
 import torch
 from tqdm.auto import tqdm
 from model import LSTMCNNCRF, CRF
+from esm import ProteinBertModel
 import os
 
 def parse_fasta(fastafile: str):
@@ -49,24 +51,14 @@ class ESMEmbedder():
 
         self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-        try:
-            from esm import pretrained
-            if local_esm_path is not None:
-                self.esm_model, self.esm_alphabet = pretrained.load_model_and_alphabet(local_esm_path)
-            elif esm == 'esm2':
-                self.esm_model, self.esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D')
-            elif esm =='esm1b':
-                self.esm_model, self.esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-            else:
-                raise NotImplementedError(esm)
-        except AttributeError:
-            # Fallback for incompatible esm versions (e.g., esm3)
-            if esm == 'esm2':
-                self.esm_model, self.esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm2_t33_650M_UR50D")
-            elif esm == 'esm1b':
-                self.esm_model, self.esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm1b_t33_650M_UR50S")
-            else:
-                raise NotImplementedError(esm)
+        if local_esm_path is not None:
+           self.esm_model, self.esm_alphabet = pretrained.load_model_and_alphabet(local_esm_path)
+        elif esm == 'esm2':
+            self.esm_model, self.esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D')
+        elif esm =='esm1b':
+            self.esm_model, self.esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
+        else:
+            raise NotImplementedError(esm)
 
         self.esm_model.eval()
         self.esm_model.to(self.device)
@@ -127,24 +119,23 @@ def esm_embed(sequences:List[str], repr_layers: int=33, progress_bar: bool = Fal
     
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-    try:
-        from esm import pretrained
-        if local_esm_path is not None:
-            esm_model, esm_alphabet = pretrained.load_model_and_alphabet(local_esm_path)
-        elif esm == 'esm2':
-            esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D')
-        elif esm =='esm1b':
-            esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        else:
-            raise NotImplementedError(esm)
-    except AttributeError:
-        # Fallback for incompatible esm versions (e.g., esm3)
-        if esm == 'esm2':
-            esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm2_t33_650M_UR50D")
-        elif esm == 'esm1b':
-            esm_model, esm_alphabet = torch.hub.load("facebookresearch/esm:main", "esm1b_t33_650M_UR50S")
-        else:
-            raise NotImplementedError(esm)
+    if local_esm_path is not None:
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet(local_esm_path)
+    elif esm == 'esm2':
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D')
+    elif esm =='esm1b':
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
+
+        # esm_args = torch.load(os.path.join(esm_dir, 'esm_model_args.pt'))
+        # esm_alphabet = torch.load(os.path.join(esm_dir, 'esm_model_alphabet.pt'))
+        # esm_model_state_dict = torch.load(os.path.join(esm_dir, 'esm_model_state_dict.pt'))
+        # esm_model = ProteinBertModel(
+        #     args=esm_args,
+        #     alphabet=esm_alphabet
+        # )
+        # esm_model.load_state_dict(esm_model_state_dict)
+    else:
+        raise NotImplementedError(esm)
 
     esm_model.eval()
     batch_converter = esm_alphabet.get_batch_converter()
@@ -203,38 +194,14 @@ def infer_sizes(state_dict):
     return n_filters, filter_size, hidden_size
     
 
-def prune_state_dict(state_dict):
-    '''Prunes a 101-state 3-label model checkpoint down to a 51-state 2-label checkpoint.'''
-    new_state_dict = state_dict.copy()
-
-    # Features to emissions output shape was [3, N]. We only want index 0 (None) and index 2 (Propeptide)
-    if 'features_to_emissions.weight' in new_state_dict and new_state_dict['features_to_emissions.weight'].shape[0] == 3:
-        new_state_dict['features_to_emissions.weight'] = new_state_dict['features_to_emissions.weight'][[0, 2], :]
-        new_state_dict['features_to_emissions.bias'] = new_state_dict['features_to_emissions.bias'][[0, 2]]
-
-    # Extract valid states: state 0, and states 51-100 (which will map to 1-50 in the new model)
-    valid_states = [0] + list(range(51, 101))
-    
-    if 'crf.transitions' in new_state_dict and new_state_dict['crf.transitions'].shape[0] == 101:
-        new_state_dict['crf.transitions'] = new_state_dict['crf.transitions'][valid_states][:, valid_states]
-        new_state_dict['crf.start_transitions'] = new_state_dict['crf.start_transitions'][valid_states]
-        new_state_dict['crf.end_transitions'] = new_state_dict['crf.end_transitions'][valid_states]
-        new_state_dict['crf._constraint_start_mask'] = new_state_dict['crf._constraint_start_mask'][valid_states]
-        new_state_dict['crf._constraint_end_mask'] = new_state_dict['crf._constraint_end_mask'][valid_states]
-        new_state_dict['crf._constraint_mask'] = new_state_dict['crf._constraint_mask'][valid_states][:, valid_states]
-
-    return new_state_dict
-
-
 def load_models(model_list):
     '''Load all the models from a list of checkpoints.'''
     #from ..models.crf_models import LSTMCNNCRF
     models = []
     for path in model_list:
-        state_dict = torch.load(path, map_location='cpu', weights_only=False)
-        state_dict = prune_state_dict(state_dict)
+        state_dict = torch.load(path, map_location='cpu')
         n_filters, filter_size, hidden_size = infer_sizes(state_dict)
-        model = LSTMCNNCRF(n_filters = n_filters, filter_size = filter_size, hidden_size= hidden_size, num_labels=2, num_states=51)
+        model = LSTMCNNCRF(n_filters = n_filters, filter_size = filter_size, hidden_size= hidden_size, num_labels=3, num_states=101)
         model.eval()
         model.load_state_dict(state_dict)
         models.append(model)
@@ -254,7 +221,7 @@ def combine_crf(models):
         ends.append(m.crf.end_transitions)
 
     with torch.no_grad():
-        crf = CRF(51, batch_first=True, include_start_end_transitions=True)
+        crf = CRF(101, batch_first=True, include_start_end_transitions=True)
         crf.transitions.data = torch.stack(transitions, dim=0).mean(dim=0)
         crf.start_transitions.data = torch.stack(starts, dim=0).mean(dim=0)
         crf.end_transitions.data = torch.stack(ends, dim=0).mean(dim=0)
@@ -357,8 +324,8 @@ def slugify(value):
     and converts spaces to hyphens.
     """
     value = unicodedata.normalize('NFKD', value)
-    value = re.sub(r'[^\w\s-]', '', value).strip().lower()
-    value = re.sub(r'[-\s]+', '-', value)
+    value = re.sub('[^\w\s-]', '', value).strip().lower()
+    value = re.sub('[-\s]+', '-', value)
     return value
 
 
