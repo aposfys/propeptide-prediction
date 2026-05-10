@@ -30,9 +30,9 @@ global_step = 0
 def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1,2], valid_partitions: List[int] = [3], test_partitions: List[int] = [4]) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     if args.embedding == 'precomputed':
-        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions, label_type=args.label_type)
-        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions, label_type=args.label_type)
-        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions, label_type=args.label_type)
+        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions)
+        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions)
+        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions)
 
     print(f'Loaded data. {len(train_set)} train sequences (p.{train_partitions}), {len(valid_set)} validation sequences (p.{valid_partitions}), {len(test_set)} test sequences (p.{test_partitions}).')
 
@@ -49,9 +49,9 @@ def get_model(args: argparse.Namespace):
     if args.model == 'lstmcnncrf':
         model = LSTMCNNCRF(
             input_size = args.embedding_dim,
-            num_labels=3 if 'with_propeptides' in args.label_type else 2,
+            num_labels=2,
             dropout_input=args.dropout,
-            num_states= 101 if 'with_propeptides' in args.label_type else 51,
+            num_states=51,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
             filter_size=args.kernel_size, 
@@ -60,9 +60,9 @@ def get_model(args: argparse.Namespace):
     elif args.model == 'lstmcnncrf_simple':
         model = SimpleLSTMCNNCRF(
             input_size = args.embedding_dim,
-            num_labels=3 if args.label_type == 'simple_with_propeptides' else 2,
+            num_labels=2,
             dropout_input=args.dropout,
-            num_states= 3 if args.label_type == 'simple_with_propeptides' else 2,
+            num_states=51,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
             filter_size=args.kernel_size, 
@@ -74,9 +74,9 @@ def get_model(args: argparse.Namespace):
         model = SelfAttentionCRF(
             input_size = args.embedding_dim,
             hidden_size= args.hidden_size,
-            num_labels=3 if 'with_propeptides' in args.label_type else 2,
+            num_labels=2,
             dropout_input=args.dropout,
-            num_states= 121 if 'with_propeptides' in args.label_type else 61,
+            num_states=51,
             n_heads=args.num_filters,
             attn_dropout=args.conv_dropout,
         )
@@ -143,7 +143,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
 
         print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}')
 
-        stopping_metric = (valid_metrics['f1 peptides'] + valid_metrics['f1 propeptides'])/2#(valid_metrics['F1 +- 3 peptide'] + valid_metrics['F1 +- 3 propeptide'])/2
+        stopping_metric = valid_metrics['f1 propeptides']#(valid_metrics['F1 +- 3 peptide'] + valid_metrics['F1 +- 3 propeptide'])/2
         if stopping_metric > previous_best:
             previous_best = stopping_metric
             best_val_metrics = valid_metrics
@@ -198,7 +198,7 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
         
         model.zero_grad()
 
-        embeddings, mask, label, peptides= batch
+        embeddings, mask, label, propeptides = batch
         embeddings = embeddings.to(device)
         mask = mask.to(device)
         label = label.to(device)
@@ -214,7 +214,7 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
             with torch.no_grad():
                 pos_probs, pos_preds, loss = model(embeddings, mask, label)
 
-        true.extend(peptides)
+        true.extend(propeptides)
         probs.append(pos_probs.detach().cpu().numpy())
         labels.append(label.detach().cpu().numpy())
         preds.extend(pos_preds)
