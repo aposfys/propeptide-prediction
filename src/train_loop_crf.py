@@ -1,79 +1,116 @@
 '''
-CRF train loop.
-- no marginals
-- no train metrics
+CRF train loop — propeptide cleavage site prediction via ESM3 + LSTM-CNN-CRF.
+
+Training protocol (DeepPeptide, Bioinformatics 2023):
+  - 50 epochs with patience-based early stopping (metric: propeptide F1).
+  - 5-fold nested cross-validation: Optuna inner loop (4-fold) finds best
+    hyperparameters; the 4 inner-fold models per outer fold are saved and
+    used as a 5×4=20-model ensemble at inference.
+  - ESM3 weights are frozen; only the prediction head is trained.
+  - Loss: negative log-likelihood of the CRF (Viterbi / forward-backward).
 '''
 import json
+import os
 import pickle
 from typing import Dict, List, Tuple
-import os
-from torch.utils.data import DataLoader
 
-from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
-#from .utils import add_dict_to_writer
-from .utils.dataset import PrecomputedCSVForOverlapCRFDataset
-#from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
-from .utils.manuscript_metrics import compute_all_metrics
-from torch.optim import Adam
-import torch
 import numpy as np
-import argparse
+import optuna
+import torch
+from torch.optim import Adam
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
-from fairscale.nn.wrap import enable_wrap, wrap
+from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
+from .utils.dataset import PrecomputedCSVForOverlapCRFDataset
+from .utils.manuscript_metrics import compute_all_metrics
+
+import argparse
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 global_step = 0
 
 
-def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1,2], valid_partitions: List[int] = [3], test_partitions: List[int] = [4]) -> Tuple[DataLoader, DataLoader, DataLoader]:
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+
+def get_dataloaders(
+    args: argparse.Namespace,
+    train_partitions: List[int],
+    valid_partitions: List[int],
+    test_partitions: List[int],
+) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     if args.embedding == 'precomputed':
-        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions)
-        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions)
-        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions)
+        train_set = PrecomputedCSVForOverlapCRFDataset(
+            args.embeddings_dir, args.data_file, args.partitioning_file,
+            partitions=train_partitions,
+        )
+        valid_set = PrecomputedCSVForOverlapCRFDataset(
+            args.embeddings_dir, args.data_file, args.partitioning_file,
+            partitions=valid_partitions,
+        )
+        test_set = PrecomputedCSVForOverlapCRFDataset(
+            args.embeddings_dir, args.data_file, args.partitioning_file,
+            partitions=test_partitions,
+        )
+    else:
+        raise NotImplementedError(args.embedding)
 
-    print(f'Loaded data. {len(train_set)} train sequences (p.{train_partitions}), {len(valid_set)} validation sequences (p.{valid_partitions}), {len(test_set)} test sequences (p.{test_partitions}).')
+    print(
+        f'Loaded data. {len(train_set)} train (p.{train_partitions}), '
+        f'{len(valid_set)} valid (p.{valid_partitions}), '
+        f'{len(test_set)} test (p.{test_partitions}).'
+    )
 
-
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=False, collate_fn=train_set.collate_fn, num_workers=2)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
-
+    nw = getattr(args, 'num_workers', 2)
+    train_loader = DataLoader(
+        train_set, batch_size=args.batch_size, shuffle=True,
+        collate_fn=train_set.collate_fn, num_workers=nw,
+    )
+    valid_loader = DataLoader(
+        valid_set, batch_size=args.batch_size, shuffle=False,
+        collate_fn=valid_set.collate_fn, num_workers=max(0, nw - 1),
+    )
+    test_loader = DataLoader(
+        test_set, batch_size=args.batch_size, shuffle=False,
+        collate_fn=test_set.collate_fn, num_workers=max(0, nw - 1),
+    )
     return train_loader, valid_loader, test_loader
 
 
-def get_model(args: argparse.Namespace):
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
 
+def get_model(args: argparse.Namespace) -> torch.nn.Module:
     if args.model == 'lstmcnncrf':
         model = LSTMCNNCRF(
-            input_size = args.embedding_dim,
+            input_size=args.embedding_dim,
             num_labels=2,
             dropout_input=args.dropout,
             num_states=51,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
-            filter_size=args.kernel_size, 
+            filter_size=args.kernel_size,
             dropout_conv1=args.conv_dropout,
         )
     elif args.model == 'lstmcnncrf_simple':
         model = SimpleLSTMCNNCRF(
-            input_size = args.embedding_dim,
+            input_size=args.embedding_dim,
             num_labels=2,
             dropout_input=args.dropout,
             num_states=51,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
-            filter_size=args.kernel_size, 
+            filter_size=args.kernel_size,
             dropout_conv1=args.conv_dropout,
         )
-
-    # NOTE just use already existing CLI args with names that don't really match. Works.
     elif args.model == 'selfattentioncrf':
         model = SelfAttentionCRF(
-            input_size = args.embedding_dim,
-            hidden_size= args.hidden_size,
+            input_size=args.embedding_dim,
+            hidden_size=args.hidden_size,
             num_labels=2,
             dropout_input=args.dropout,
             num_states=51,
@@ -83,184 +120,324 @@ def get_model(args: argparse.Namespace):
     else:
         raise NotImplementedError(args.model)
 
-    print('trainable params: ', sum(p.numel() for p in model.parameters() if p.requires_grad))
-
+    print('Trainable params:', sum(p.numel() for p in model.parameters() if p.requires_grad))
     return model
 
 
-def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[int] = [3], test_partitions: List[int] = [4], is_initiated: bool = False):
-    global global_step
-    global_step = 0
-    train_loader, valid_loader, test_loader = get_dataloaders(args, train_partitions, valid_partitions, test_partitions)
+def _flatten_lstm_if_present(model: torch.nn.Module) -> None:
+    '''Call flatten_parameters only when the feature extractor has a biLSTM.'''
+    fe = getattr(model, 'feature_extractor', None)
+    lstm = getattr(fe, 'biLSTM', None)
+    if lstm is not None:
+        lstm.flatten_parameters()
 
 
-    # if not is_initiated:
-    #     # when we run in nested CV, we need to do this outside of train() to avoid reinitialization errors.
-    #     url = "tcp://localhost:12355"
-    #     torch.distributed.init_process_group(backend="gloo", init_method = url, world_size=1, rank=0)
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
-
-    # initialize the model with FSDP wrapper
-    fsdp_params = dict(
-        mixed_precision=False,
-        flatten_parameters=False,
-        state_dict_device=torch.device("cpu"),  # reduce GPU mem usage
-        move_params_to_cpu =True,  # enable cpu offloading
-        move_grads_to_cpu = True,
-    )
-
-    model = get_model(args)
-
-    # # NOTE FSDP does not support non-trainable weights yet. CRF has some.
-    # # https://github.com/pytorch/pytorch/issues/75943
-    # model = FSDP(model, **fsdp_params)
-
-
-    model.to(device)  # Ensure model is moved to CPU
-
-    model.feature_extractor.biLSTM.flatten_parameters()
-    # model = get_model(args)
-    # model.to(device)
-    optimizer = Adam(model.parameters(), lr = args.lr)
-    writer = SummaryWriter(args.out_dir)
-
-    previous_best = -100000000000
-
-    for epoch in range(args.epochs):
-
-        train_loss, train_probs, train_preds, train_peptides, train_labels = run_dataloader(train_loader, model, optimizer, writer, do_train=True)
-        #train_metrics = compute_crf_metrics(train_probs, train_preds, train_peptides, train_labels)
-        #train_metrics = metrics_fn(train_peptides, train_preds)
-        #add_dict_to_writer(train_metrics, writer, global_step, prefix='Train')
-
-        valid_loss, valid_probs, valid_preds, valid_peptides, valid_labels = run_dataloader(valid_loader, model, optimizer, writer, do_train=False)
-        #valid_metrics_old = compute_crf_metrics(valid_probs, valid_preds, valid_peptides, valid_labels)#, organism=valid_loader.dataset.data['organism'])
-        #valid_metrics = metrics_fn(valid_peptides, valid_preds, valid_loader.dataset.data['organism'])
-        valid_metrics = compute_all_metrics(valid_probs, valid_preds, valid_labels, valid_loader.dataset.names, valid_loader.dataset.data, windows = [3])[0]
-        #add_dict_to_writer(valid_metrics, writer, global_step, prefix='Valid')
-        writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
-
-
-        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}')
-
-        stopping_metric = valid_metrics['f1 propeptides']#(valid_metrics['F1 +- 3 peptide'] + valid_metrics['F1 +- 3 propeptide'])/2
-        if stopping_metric > previous_best:
-            previous_best = stopping_metric
-            best_val_metrics = valid_metrics
-            pickle.dump((valid_probs, valid_preds, valid_labels, valid_loader.dataset.names), open(os.path.join(args.out_dir, 'valid_outputs.pickle'), 'wb'))
-            valid_metrics['epoch'] = epoch # keep track of best early stopping.
-            json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
-            torch.save(model.state_dict(), os.path.join(args.out_dir, 'model.pt'))
-
-            # valid_metrics = metrics_fn(valid_peptides, valid_preds, valid_loader.dataset.data['organism'])
-            # valid_metrics['epoch'] = epoch # keep track of best early stopping.
-            # json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics_old.json'), 'w'), indent=2)
-    
-    model.load_state_dict(torch.load(os.path.join(args.out_dir, 'model.pt')))
-    test_loss, test_probs, test_preds, test_peptides, test_labels = run_dataloader(test_loader, model, optimizer, writer, do_train=False)
-    #test_metrics = compute_crf_metrics(test_probs, test_preds, test_peptides, test_labels, organism=test_loader.dataset.data['organism'])
-    #test_metrics = metrics_fn(test_peptides, test_preds, test_loader.dataset.data['organism'])
-    test_metrics = compute_all_metrics(test_probs, test_preds, test_labels, test_loader.dataset.names, test_loader.dataset.data, windows = [3])[0]
-    #add_dict_to_writer(test_metrics, writer, global_step, prefix='Test')
-    writer.add_scalar('Test/loss', test_loss, global_step=global_step)
-    print('Test complete.')
-    pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names), open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
-    json.dump(test_metrics, open(os.path.join(args.out_dir, 'test_metrics.json'), 'w'), indent=2)
-
-    return best_val_metrics, test_metrics
-
-    
-
-def run_dataloader(loader: torch.utils.data.DataLoader, 
-                    model: torch.nn.Module, 
-                    optimizer: torch.optim.Optimizer, 
-                    writer: SummaryWriter,
-                    do_train: bool = True,
-                ) -> Tuple[float, List[np.ndarray], List[List[int]], List[np.ndarray], List[np.ndarray]]:
-    '''
-    Run a dataloader through the model. Collect predicted probabilitities and
-    true labels. Can be used both for training and prediction.
-    '''
+def run_dataloader(
+    loader: DataLoader,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    writer: SummaryWriter,
+    do_train: bool = True,
+) -> Tuple[float, List[np.ndarray], List[List[int]], List[np.ndarray], List[np.ndarray]]:
+    '''Run one epoch; collect per-sequence Viterbi paths, marginals, and labels.'''
     global global_step
 
-    true = [] # peptide coordinates
-    labels = [] # labels made from coordinates
-    probs = [] # per-position probabilities
-    preds = [] # viterbi paths
+    true_peptides = []
+    labels = []
+    probs = []
+    preds = []
     epoch_loss = []
 
-    if do_train:
-        model.train()
-    else:
-        model.eval()
+    model.train() if do_train else model.eval()
 
-    for idx, batch in enumerate(loader):
-        
-        model.zero_grad()
-
+    for batch in loader:
         embeddings, mask, label, propeptides = batch
         embeddings = embeddings.to(device)
         mask = mask.to(device)
         label = label.to(device)
 
         if do_train:
+            model.zero_grad()
             pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
-            torch.nn.utils.clip_grad_norm_(model.parameters(),0.25 )
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
             optimizer.step()
             writer.add_scalar('Train/loss', loss.item(), global_step=global_step)
             global_step += 1
         else:
             with torch.no_grad():
-                pos_probs, pos_preds, loss = model(embeddings, mask, label)
+                pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
 
-        true.extend(propeptides)
-        probs.append(pos_probs.detach().cpu().numpy())
-        labels.append(label.detach().cpu().numpy())
+        true_peptides.extend(propeptides)
+        probs.extend([pos_probs[i].detach().cpu().numpy() for i in range(pos_probs.shape[0])])
+        labels.extend([label[i].detach().cpu().numpy() for i in range(label.shape[0])])
         preds.extend(pos_preds)
         epoch_loss.append(loss.item())
 
-
-    epoch_loss = sum(epoch_loss)/len(epoch_loss)
-
-    return epoch_loss, probs, preds, true, labels
+    return sum(epoch_loss) / len(epoch_loss), probs, preds, true_peptides, labels
 
 
+def run_training_for_params(
+    args: argparse.Namespace,
+    model: torch.nn.Module,
+    train_loader: DataLoader,
+    valid_loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    writer: SummaryWriter,
+    checkpoint_path: str,
+) -> Tuple[Dict, float]:
+    '''Train up to args.epochs with patience-based early stopping on propeptide F1.'''
+    global global_step
+    global_step = 0
+
+    best_score = -1.0
+    best_val_metrics = None
+    patience_counter = 0
+
+    for epoch in range(args.epochs):
+        run_dataloader(train_loader, model, optimizer, writer, do_train=True)
+
+        _, valid_probs, valid_preds, _, valid_labels = run_dataloader(
+            valid_loader, model, optimizer, writer, do_train=False
+        )
+        valid_metrics = compute_all_metrics(
+            valid_probs, valid_preds, valid_labels,
+            valid_loader.dataset.names, valid_loader.dataset.data,
+            windows=[3],
+        )[0]
+
+        score = valid_metrics['f1 propeptides']
+        writer.add_scalar('Valid/f1_propeptides', score, global_step=epoch)
+
+        if score > best_score:
+            best_score = score
+            best_val_metrics = {**valid_metrics, 'epoch': epoch}
+            torch.save(model.state_dict(), checkpoint_path)
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print(f'Early stopping at epoch {epoch} (patience={args.patience}).')
+                break
+
+    return best_val_metrics, best_score
 
 
+# ---------------------------------------------------------------------------
+# Optuna inner loop
+# ---------------------------------------------------------------------------
 
-def parse_arguments():
-    '''Parse arguments, prepare output directory and dump run configuration.'''
+def objective(
+    trial: optuna.Trial,
+    args: argparse.Namespace,
+    outer_train_partitions: List[int],
+    outer_fold: int,
+) -> float:
+    '''4-fold inner CV objective for Optuna hyperparameter search.
+
+    Search space is calibrated for ESM3 (1536-dim) + propeptide-only CRF:
+      - num_filters / hidden_size start at 32 (not 16) because ESM3 is more
+        expressive and the model needs capacity to exploit it.
+      - batch_size upper bound is 64 (not 128) to stay within GPU VRAM when
+        sequences are padded to their longest member (1536 × L × batch).
+      - weight_decay is searched to regularize against the richer ESM3 features.
+    '''
+    args.lr           = trial.suggest_float('lr', 1e-5, 1e-3, log=True)
+    args.dropout      = trial.suggest_float('dropout', 0.0, 0.5)
+    args.conv_dropout = trial.suggest_float('conv_dropout', 0.0, 0.5)
+    args.weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
+    args.num_filters  = trial.suggest_categorical('num_filters', [32, 64, 128])
+    args.hidden_size  = trial.suggest_categorical('hidden_size', [32, 64, 128])
+    args.batch_size   = trial.suggest_categorical('batch_size', [16, 32, 64])
+    args.kernel_size  = trial.suggest_categorical('kernel_size', [3, 5, 7])
+
+    inner_scores = []
+
+    for inner_i, inner_val in enumerate(outer_train_partitions):
+        inner_train = [p for p in outer_train_partitions if p != inner_val]
+        train_loader, valid_loader, _ = get_dataloaders(
+            args, inner_train, [inner_val], [inner_val],
+        )
+        model = get_model(args).to(device)
+        _flatten_lstm_if_present(model)
+        optimizer = Adam(model.parameters(), lr=args.lr,
+                         weight_decay=args.weight_decay)
+        ckpt = os.path.join(
+            args.out_dir,
+            f'tmp_outer{outer_fold}_trial{trial.number}_inner{inner_i}.pt',
+        )
+        writer = SummaryWriter(
+            os.path.join(args.out_dir, f'trial{trial.number}_outer{outer_fold}_inner{inner_i}')
+        )
+
+        _, score = run_training_for_params(
+            args, model, train_loader, valid_loader, optimizer, writer, ckpt,
+        )
+        inner_scores.append(score)
+        writer.close()
+
+        # Remove the temporary checkpoint to save disk space
+        if os.path.exists(ckpt):
+            os.remove(ckpt)
+
+    return float(np.mean(inner_scores))
+
+
+# ---------------------------------------------------------------------------
+# Outer 5-fold nested CV  (main entry point)
+# ---------------------------------------------------------------------------
+
+def train_nested_cv(args: argparse.Namespace) -> Dict:
+    '''
+    Full 5-fold nested cross-validation as described in DeepPeptide (2023).
+
+    Outer loop  : 5 folds, each with 1 test partition and 4 training partitions.
+    Inner loop  : Optuna optimizes hyperparameters via 4-fold CV on the outer
+                  training partitions.
+    Models saved: all 4 inner-fold models per outer fold → 5×4 = 20 models for
+                  ensemble inference.
+    '''
+    all_partitions = list(range(5))
+    all_outer_results = []
+
+    for outer_fold in range(5):
+        print(f'\n=== Outer fold {outer_fold} ===')
+        test_partition = [outer_fold]
+        outer_train_partitions = [p for p in all_partitions if p != outer_fold]
+
+        # ---- Inner loop: Optuna ----
+        study = optuna.create_study(direction='maximize')
+        study.optimize(
+            lambda trial: objective(trial, args, outer_train_partitions, outer_fold),
+            n_trials=args.n_trials,
+        )
+        best_params = study.best_params
+        print(f'Best hyperparameters (outer fold {outer_fold}):', best_params)
+        for k, v in best_params.items():
+            setattr(args, k, v)
+
+        json.dump(
+            best_params,
+            open(os.path.join(args.out_dir, f'best_params_outer{outer_fold}.json'), 'w'),
+            indent=2,
+        )
+
+        # ---- Retrain 4 inner-fold models with best hyperparameters ----
+        outer_fold_test_metrics = []
+
+        for inner_i, inner_val in enumerate(outer_train_partitions):
+            inner_train = [p for p in outer_train_partitions if p != inner_val]
+
+            train_loader, valid_loader, test_loader = get_dataloaders(
+                args, inner_train, [inner_val], test_partition,
+            )
+
+            model = get_model(args).to(device)
+            _flatten_lstm_if_present(model)
+            optimizer = Adam(model.parameters(), lr=args.lr,
+                             weight_decay=getattr(args, 'weight_decay', 0.0))
+
+            ckpt_path = os.path.join(
+                args.out_dir, f'model_outer{outer_fold}_inner{inner_i}.pt'
+            )
+            writer = SummaryWriter(
+                os.path.join(args.out_dir, f'outer{outer_fold}_inner{inner_i}')
+            )
+
+            _, _ = run_training_for_params(
+                args, model, train_loader, valid_loader, optimizer, writer, ckpt_path,
+            )
+            writer.close()
+
+            # Evaluate on outer test partition
+            model.load_state_dict(torch.load(ckpt_path, map_location=device))
+            _, test_probs, test_preds, _, test_labels = run_dataloader(
+                test_loader, model, optimizer, writer, do_train=False,
+            )
+            test_metrics = compute_all_metrics(
+                test_probs, test_preds, test_labels,
+                test_loader.dataset.names, test_loader.dataset.data,
+                windows=[3],
+            )[0]
+            test_metrics['outer_fold'] = outer_fold
+            test_metrics['inner_fold'] = inner_i
+            outer_fold_test_metrics.append(test_metrics)
+
+            pickle.dump(
+                (test_probs, test_preds, test_labels, test_loader.dataset.names),
+                open(os.path.join(
+                    args.out_dir, f'test_outputs_outer{outer_fold}_inner{inner_i}.pickle'
+                ), 'wb'),
+            )
+            print(
+                f'  inner fold {inner_i}: test F1 propeptides = '
+                f'{test_metrics["f1 propeptides"]:.4f}'
+            )
+
+        all_outer_results.extend(outer_fold_test_metrics)
+
+    # ---- Aggregate results across all 20 models ----
+    f1_scores = [m['f1 propeptides'] for m in all_outer_results]
+    summary = {
+        'mean_f1_propeptides': float(np.mean(f1_scores)),
+        'std_f1_propeptides':  float(np.std(f1_scores)),
+        'n_models': len(all_outer_results),
+        'per_model': all_outer_results,
+    }
+    json.dump(summary, open(os.path.join(args.out_dir, 'nested_cv_summary.json'), 'w'), indent=2)
+    print(
+        f'\nNested CV complete. '
+        f'Mean propeptide F1 = {summary["mean_f1_propeptides"]:.4f} '
+        f'± {summary["std_f1_propeptides"]:.4f}'
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def parse_arguments() -> argparse.Namespace:
     p = argparse.ArgumentParser()
 
-    p.add_argument('--embeddings_dir', type=str, help='Embeddings dir produced by `extract.py`', default = '/data3/fegt_data/embeddings/')
-    p.add_argument('--data_file', '-df', type=str, help='Sequences with Graph-Part headers', default = 'data/uniprot_12052022_cv_5_50/labeled_sequences.csv')
-    p.add_argument('--partitioning_file', '-pf', type=str, help='Graph-Part output. Assume train-val-test split.', default = 'data/uniprot_12052022_cv_5_50/graphpart_assignments.csv')
-    p.add_argument('--embedding', '-em', type=str, help='Sequence embedding strategy.', default='precomputed')
-    p.add_argument('--embedding_dim', '-ed', type=int, help='Sequence embedding dimension.', default=1280)
+    p.add_argument('--embeddings_dir', type=str, default='/data3/fegt_data/embeddings/')
+    p.add_argument('--data_file', '-df', type=str,
+                   default='data/uniprot_12052022_cv_5_50/labeled_sequences.csv')
+    p.add_argument('--partitioning_file', '-pf', type=str,
+                   default='data/uniprot_12052022_cv_5_50/graphpart_assignments.csv')
+    p.add_argument('--embedding', '-em', type=str, default='precomputed')
+    p.add_argument('--embedding_dim', '-ed', type=int, default=1536)
 
     p.add_argument('--model', '-m', type=str, default='lstmcnncrf')
 
-    p.add_argument('--out_dir', '-od', type=str, help='name that will be added to the runs folder output', default='train_run')
-    p.add_argument('--epochs', type=int, default=30, help='number of times to iterate through all samples')
-    p.add_argument('--batch_size', '-bs', type=int, default=100, help='samples that will be processed in parallel')
+    p.add_argument('--out_dir', '-od', type=str, default='train_run')
+    p.add_argument('--epochs', type=int, default=50)
+    p.add_argument('--patience', type=int, default=10,
+                   help='Early stopping patience (epochs without improvement).')
+    p.add_argument('--batch_size', '-bs', type=int, default=64)
+    p.add_argument('--n_trials', type=int, default=50,
+                   help='Number of Optuna trials per outer fold.')
+    p.add_argument('--num_workers', type=int, default=2,
+                   help='DataLoader worker processes (use 0 for in-process loading).')
 
+    # These are the starting defaults; Optuna will override them during search.
     p.add_argument('--lr', type=float, default=1e-4)
     p.add_argument('--dropout', type=float, default=0.1)
     p.add_argument('--conv_dropout', type=float, default=0.1)
+    p.add_argument('--weight_decay', type=float, default=0.0)
     p.add_argument('--kernel_size', type=int, default=3)
-    p.add_argument('--num_filters', type=int, default=32)
+    p.add_argument('--num_filters', type=int, default=64)
     p.add_argument('--hidden_size', type=int, default=64)
 
-    p.add_argument('--label_type', type=str, default='multistate_with_propeptides')
-
     args = p.parse_args()
-
     os.makedirs(args.out_dir, exist_ok=True)
     json.dump(vars(args), open(os.path.join(args.out_dir, 'config.json'), 'w'), indent=3)
-
     return args
 
 
 if __name__ == '__main__':
-    train(parse_arguments())
+    train_nested_cv(parse_arguments())

@@ -1,10 +1,9 @@
 '''
-Generate ESM-1b embeddings (per position) and save as one 
+Generate ESM3 embeddings (per position) and save as one
 file per sequence. Use md5 hash of sequence as file name.
 Adapted from DeepTMHMM.
 '''
 from hashlib import md5
-from esm import Alphabet, FastaBatchedDataset, ProteinBertModel, pretrained, FastaBatchedDataset
 import torch
 import os
 import argparse
@@ -13,69 +12,62 @@ import pathlib
 def hash_aa_string(string):
     return md5(string.encode()).digest().hex()
 
+
+def _read_fasta(fasta_file):
+    '''Parse FASTA, deduplicate by sequence hash, return list of (label, seq).'''
+    sequences = {}
+    label, seq_parts = None, []
+    with open(fasta_file) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('>'):
+                if label is not None and seq_parts:
+                    seq = ''.join(seq_parts)
+                    h = hash_aa_string(seq)
+                    if h not in sequences:
+                        sequences[h] = (label, seq)
+                label = line[1:]
+                seq_parts = []
+            else:
+                seq_parts.append(line)
+    if label is not None and seq_parts:
+        seq = ''.join(seq_parts)
+        h = hash_aa_string(seq)
+        if h not in sequences:
+            sequences[h] = (label, seq)
+    return list(sequences.values())
+
+
 from tqdm.auto import tqdm
 def generate_esm_embeddings(fasta_file, esm_embeddings_dir, repr_layers=33):
-    esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D') # esm1b_t33_650M_UR50S
+    from esm.models.esm3 import ESM3
+    from esm.sdk.api import ESMProtein
 
-    dataset = FastaBatchedDataset.from_file(fasta_file)
-    
+    esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
+
+    dataset = _read_fasta(fasta_file)
+    print(f'  {len(dataset)} unique sequences to embed')
+
     with torch.no_grad():
         if torch.cuda.is_available():
             esm_model = esm_model.cuda()
 
-        batch_converter = esm_alphabet.get_batch_converter()
-        
-        print("Starting to generate embeddings")
+        print('Starting to generate embeddings')
 
-            
-        for idx, item in enumerate(tqdm(dataset)):
-            
-            label, seq = item
-            
-            if os.path.isfile(f'{esm_embeddings_dir}/{hash_aa_string(seq)}.pt'):
-                print("Already processed sequence")
+        for label, seq in tqdm(dataset):
+            out_path = os.path.join(esm_embeddings_dir, f'{hash_aa_string(seq)}.pt')
+            if os.path.isfile(out_path):
                 continue
-                                
-            
-            seqs = list([("seq", s) for s in [seq]])
-            labels, strs, toks = batch_converter(seqs)
 
-            repr_layers_list = [
-                (i + esm_model.num_layers + 1) % (esm_model.num_layers + 1) for i in range(repr_layers+1)
-            ]
+            protein = ESMProtein(sequence=seq)
+            encoded = esm_model.encode(protein)
 
-            out = None
+            out = esm_model(
+                sequence_tokens=encoded.sequence.unsqueeze(0),
+            )
 
-            if torch.cuda.is_available():
-                toks = toks.to(device="cuda", non_blocking=True)
-
-            minibatch_max_length = toks.size(1)
-
-            tokens_list = []
-            end = 0
-            while end <= minibatch_max_length:
-                start = end
-                end = start + 1022
-                if end <= minibatch_max_length:
-                    # we are not on the last one, so make this shorter
-                    end = end - 300
-                tokens = esm_model(toks[:, start:end], repr_layers=repr_layers_list, return_contacts=False)["representations"][33]
-                tokens_list.append(tokens)
-
-            out = torch.cat(tokens_list, dim=1).cpu()
-
-            # set nan to zeros
-            out[out!=out] = 0.0
-
-            res = out.transpose(0,1)[1:-1] 
-            seq_embedding = res[:,0]
-            #print(seq_embedding.size())
-
-            output_file = open(f'{esm_embeddings_dir}/{hash_aa_string(seq)}.pt', 'wb')
-            torch.save(seq_embedding, output_file)
-            output_file.close()
-
-            #print(f"Saved embedding to {esm_embeddings_dir}")
+            seq_embedding = out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS
+            torch.save(seq_embedding, out_path)
 
 
 def main():

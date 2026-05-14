@@ -6,7 +6,8 @@ any changes aside from the input dimension.
 
 '''
 from hashlib import md5
-from esm import Alphabet, FastaBatchedDataset, ProteinBertModel, pretrained, FastaBatchedDataset
+from esm.data import FastaBatchedDataset
+from esm import pretrained
 import torch
 import os
 import argparse
@@ -17,7 +18,8 @@ def hash_aa_string(string):
 
 from tqdm.auto import tqdm
 def generate_esm_embeddings(fasta_file, esm_embeddings_dir, repr_layers=33):
-    esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
+    from esm.models.esm3 import ESM3
+    esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
 
     dataset = FastaBatchedDataset.from_file(fasta_file)
     
@@ -41,20 +43,20 @@ def generate_esm_embeddings(fasta_file, esm_embeddings_dir, repr_layers=33):
                                 
             #print(f"Sequence length: {len(original_aa_string)}")
             
-            seqs = list([("seq", s) for s in [seq]])
-            labels, strs, toks = batch_converter(seqs)
+            
+            # ESM3 encoding
+            from esm.sdk.api import ESMProtein
+            protein = ESMProtein(sequence=seq)
+            encoded = esm_model.encode(protein)
+            
+            toks = encoded.sequence_tokens
 
-            toks = toks
-
-            seq_embedding = torch.nn.functional.one_hot(toks, num_classes=33) # (1, seq_len, dim)
-
+            seq_embedding = torch.nn.functional.one_hot(toks, num_classes=esm_model.tokenizers.sequence.vocab_size) # (1, seq_len, dim)
             seq_embedding = seq_embedding[0][1:-1] 
 
             output_file = open(f'{esm_embeddings_dir}/{hash_aa_string(seq)}.pt', 'wb')
             torch.save(seq_embedding, output_file)
             output_file.close()
-
-            #print(f"Saved embedding to {esm_embeddings_dir}")
 
 
 def main():
