@@ -199,7 +199,7 @@ def run_training_for_params(
     patience_counter = 0
 
     for epoch in range(args.epochs):
-        run_dataloader(train_loader, model, optimizer, writer, do_train=True)
+        train_loss, _, _, _, _ = run_dataloader(train_loader, model, optimizer, writer, do_train=True)
 
         _, valid_probs, valid_preds, _, valid_labels = run_dataloader(
             valid_loader, model, optimizer, writer, do_train=False
@@ -213,6 +213,9 @@ def run_training_for_params(
         score = valid_metrics['f1 propeptides']
         writer.add_scalar('Valid/f1_propeptides', score, global_step=epoch)
 
+        marker = '*' if score > best_score else ' '
+        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={score:.4f}  best={max(best_score, score):.4f}  patience={patience_counter}/{args.patience}', flush=True)
+
         if score > best_score:
             best_score = score
             best_val_metrics = {**valid_metrics, 'epoch': epoch}
@@ -221,7 +224,7 @@ def run_training_for_params(
         else:
             patience_counter += 1
             if patience_counter >= args.patience:
-                print(f'Early stopping at epoch {epoch} (patience={args.patience}).')
+                print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
                 break
 
     return best_val_metrics, best_score
@@ -311,8 +314,15 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
 
         # ---- Inner loop: Optuna ----
         study = optuna.create_study(direction='maximize')
+
+        def _objective_with_log(trial):
+            print(f'\n--- Outer {outer_fold} | Trial {trial.number+1}/{args.n_trials} ---', flush=True)
+            score = objective(trial, args, outer_train_partitions, outer_fold)
+            print(f'    Trial {trial.number+1} score: {score:.4f}', flush=True)
+            return score
+
         study.optimize(
-            lambda trial: objective(trial, args, outer_train_partitions, outer_fold),
+            _objective_with_log,
             n_trials=args.n_trials,
         )
         best_params = study.best_params
