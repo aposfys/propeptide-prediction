@@ -262,20 +262,31 @@ def objective(
         sequences are padded to their longest member (1536 × L × batch).
       - weight_decay is searched to regularize against the richer ESM3 features.
     '''
-    # ESM3 (1536-dim) produces richer features than ESM2 (1280-dim).
-    # - num_filters/hidden_size floor raised to 64: 32 filters are too narrow
-    #   to project 1536-dim features usefully.
-    # - batch_size floor raised to 32: batch=16 causes unstable gradients with
-    #   variable-length padded sequences and high-LR configs.
-    # - weight_decay lower bound raised to 1e-5: 1e-6 is effectively no reg.
-    args.lr           = trial.suggest_float('lr', 1e-5, 5e-4, log=True)
-    args.dropout      = trial.suggest_float('dropout', 0.0, 0.4)
-    args.conv_dropout = trial.suggest_float('conv_dropout', 0.0, 0.4)
-    args.weight_decay = trial.suggest_float('weight_decay', 1e-5, 1e-3, log=True)
-    args.num_filters  = trial.suggest_categorical('num_filters', [64, 128, 256])
-    args.hidden_size  = trial.suggest_categorical('hidden_size', [64, 128, 256])
-    args.batch_size   = trial.suggest_categorical('batch_size', [32, 64])
-    args.kernel_size  = trial.suggest_categorical('kernel_size', [3, 5, 7])
+    # Search space narrowed for ESM3 (1536-dim) + small Optuna budget (5 trials).
+    #
+    # Architecture data-flow: (batch,1536,L) → Conv1(1536→n_filters) → biLSTM
+    # → Conv2(hidden*2→n_filters*2) → Linear(n_filters*2→2) → 51-state CRF
+    #
+    # Fixed (not searched):
+    #   batch_size=64  — largest stable batch; fewer iterations per epoch = faster
+    #   kernel_size=3  — short local context is what matters for cleavage sites
+    #   weight_decay=1e-4 — light L2, not critical with only ~6k sequences
+    #
+    # Searched (most impact on ESM3 performance):
+    #   lr           — most sensitive; LR scheduler handles decay automatically
+    #   num_filters  — controls 1536→n_filters compression bottleneck (64 = 24:1,
+    #                  128 = 12:1); must be ≥64 for ESM3
+    #   hidden_size  — LSTM state size; must be ≥ n_filters/2 to avoid underfitting
+    #   dropout      — single dropout rate applied at both input and conv layers
+    args.batch_size   = 64
+    args.kernel_size  = 3
+    args.weight_decay = 1e-4
+
+    args.lr          = trial.suggest_float('lr', 5e-5, 3e-4, log=True)
+    args.num_filters = trial.suggest_categorical('num_filters', [64, 128])
+    args.hidden_size = trial.suggest_categorical('hidden_size', [64, 128])
+    args.dropout     = trial.suggest_float('dropout', 0.1, 0.3)
+    args.conv_dropout = args.dropout  # tie the two dropout rates
 
     inner_scores = []
 
