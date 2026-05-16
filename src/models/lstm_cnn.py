@@ -159,30 +159,16 @@ class SequenceTaggingLSTMCNN(nn.Module):
             return logits
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
         from esm.models.esm3 import ESM3
         from esm.sdk.api import ESMProtein
-        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
-        esm_model.to(device)
+        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval().to(device)
 
         protein = ESMProtein(sequence=sequence)
         encoded = esm_model.encode(protein)
-        
-        if device.type == 'cuda':
-            for k, v in encoded.items():
-                if isinstance(v, torch.Tensor):
-                    encoded[k] = v.to(device=device, non_blocking=True)
-        
         with torch.no_grad():
-            out = esm_model(
-                sequence_tokens=encoded.sequence_tokens,
-                structure_tokens=encoded.structure_tokens if hasattr(encoded, 'structure_tokens') else None,
-                ss8_tokens=encoded.ss8_tokens if hasattr(encoded, 'ss8_tokens') else None,
-                sasa_tokens=encoded.sasa_tokens if hasattr(encoded, 'sasa_tokens') else None,
-                function_tokens=encoded.function_tokens if hasattr(encoded, 'function_tokens') else None,
-            )
-        seq_embedding = out.embeddings[0, 1:-1]
-        return seq_embedding
+            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
+        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, tissue_id: int = None, return_logits: bool = False):
         self.eval()
@@ -412,30 +398,16 @@ class SequenceTaggingLSTM(nn.Module):
             return logits
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
         from esm.models.esm3 import ESM3
         from esm.sdk.api import ESMProtein
-        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
-        esm_model.to(device)
+        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval().to(device)
 
         protein = ESMProtein(sequence=sequence)
         encoded = esm_model.encode(protein)
-        
-        if device.type == 'cuda':
-            for k, v in encoded.items():
-                if isinstance(v, torch.Tensor):
-                    encoded[k] = v.to(device=device, non_blocking=True)
-        
         with torch.no_grad():
-            out = esm_model(
-                sequence_tokens=encoded.sequence_tokens,
-                structure_tokens=encoded.structure_tokens if hasattr(encoded, 'structure_tokens') else None,
-                ss8_tokens=encoded.ss8_tokens if hasattr(encoded, 'ss8_tokens') else None,
-                sasa_tokens=encoded.sasa_tokens if hasattr(encoded, 'sasa_tokens') else None,
-                function_tokens=encoded.function_tokens if hasattr(encoded, 'function_tokens') else None,
-            )
-        seq_embedding = out.embeddings[0, 1:-1]
-        return seq_embedding
+            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
+        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, tissue_id: int = None, return_logits: bool = False):
         self.eval()
@@ -583,30 +555,16 @@ class SequenceTaggingLSTMCNNCRF(nn.Module):
             return logit_probs[:,:,1], pos_preds
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
         from esm.models.esm3 import ESM3
         from esm.sdk.api import ESMProtein
-        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
-        esm_model.to(device)
+        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval().to(device)
 
         protein = ESMProtein(sequence=sequence)
         encoded = esm_model.encode(protein)
-        
-        if device.type == 'cuda':
-            for k, v in encoded.items():
-                if isinstance(v, torch.Tensor):
-                    encoded[k] = v.to(device=device, non_blocking=True)
-        
         with torch.no_grad():
-            out = esm_model(
-                sequence_tokens=encoded.sequence_tokens,
-                structure_tokens=encoded.structure_tokens if hasattr(encoded, 'structure_tokens') else None,
-                ss8_tokens=encoded.ss8_tokens if hasattr(encoded, 'ss8_tokens') else None,
-                sasa_tokens=encoded.sasa_tokens if hasattr(encoded, 'sasa_tokens') else None,
-                function_tokens=encoded.function_tokens if hasattr(encoded, 'function_tokens') else None,
-            )
-        seq_embedding = out.embeddings[0, 1:-1]
-        return seq_embedding
+            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
+        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, tissue_id: int = None, return_logits: bool = False):
         self.eval()

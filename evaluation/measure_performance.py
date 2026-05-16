@@ -1,369 +1,215 @@
 '''
-Script to compute performance metrics.
-Works on cross-validated predictions that are saved as test_outputs.pickle by the training script.
+Compute performance metrics for the propeptide-only ESM3 nested-CV pipeline.
+
+Reads the test_outputs_outer{i}_inner{j}.pickle files saved by train_loop_crf.py
+and reports precision / recall / F1 for propeptide detection at tolerances 0–3.
+
+Usage (from repo root):
+    python evaluation/measure_performance.py \
+        --out_dir /data/apostolos/nested_cv_run \
+        --data_file data/labeled_sequences.csv
 '''
 
-import pandas as pd
+import argparse
 import os
 import pickle
 from typing import List, Tuple
+
+import pandas as pd
 from tqdm.auto import tqdm
 
-PEPTIDE_START_STATE, PEPTIDE_END_STATE = 1, 50
-PROPEPTIDE_START_STATE, PROPEPTIDE_END_STATE = 51, 100
+# ---- CRF state constants (propeptide-only model: 51 states, 0=background) ----
+PROPEPTIDE_START_STATE = 1
+PROPEPTIDE_END_STATE   = 50
 
-BEST_CHECKPOINTS = [
 
-    # ESM2 models on balanced dataset - layer 33.
-    '../hyperparam_runs_esm2_650_balanced_33/0/1/1',
-    '../hyperparam_runs_esm2_650_balanced_33/0/1/2',
-    '../hyperparam_runs_esm2_650_balanced_33/0/1/3',
-    '../hyperparam_runs_esm2_650_balanced_33/0/1/4',
-
-    '../hyperparam_runs_esm2_650_balanced_33/1/7/0',
-    '../hyperparam_runs_esm2_650_balanced_33/1/7/2',
-    '../hyperparam_runs_esm2_650_balanced_33/1/7/3',
-    '../hyperparam_runs_esm2_650_balanced_33/1/7/4',
-
-    '../hyperparam_runs_esm2_650_balanced_33/2/9/0',
-    '../hyperparam_runs_esm2_650_balanced_33/2/9/1',
-    '../hyperparam_runs_esm2_650_balanced_33/2/9/3',
-    '../hyperparam_runs_esm2_650_balanced_33/2/9/4',
-
-    '../hyperparam_runs_esm2_650_balanced_33/3/4/0',
-    '../hyperparam_runs_esm2_650_balanced_33/3/4/1',
-    '../hyperparam_runs_esm2_650_balanced_33/3/4/2',
-    '../hyperparam_runs_esm2_650_balanced_33/3/4/4',
-
-    '../hyperparam_runs_esm2_650_balanced_33/4/3/0',
-    '../hyperparam_runs_esm2_650_balanced_33/4/3/1',
-    '../hyperparam_runs_esm2_650_balanced_33/4/3/2',
-    '../hyperparam_runs_esm2_650_balanced_33/4/3/3',
-]
-
-def convert_path_to_peptide_borders(pred: List[int], start_state, stop_state, offset: int=0) -> List[Tuple[int,int]]:
-    '''Given a sequence of states, find the borders of contiguous peptide segments.
-       Offset adds a constant to all coordinates (1-based indexing in uniprot)
-    '''
-
+def convert_path_to_peptide_borders(
+    pred: List[int],
+    start_state: int,
+    stop_state: int,
+    offset: int = 0,
+) -> List[Tuple[int, int]]:
+    '''Given a Viterbi state sequence, return (start, end) tuples for each segment.'''
     seq_peptides = []
-    is_peptide = False
+    is_peptide   = False
+    peptide_start = 0
 
     for pos, p in enumerate(pred):
-        
-        if p == start_state and not is_peptide: # open a new peptide
-            is_peptide = True
+        if p == start_state and not is_peptide:
+            is_peptide    = True
             peptide_start = pos
-
-        # Close the peptide at the position that has the stop state. (can restart peptide immediately without NO-peptide gap.)
-        elif p == stop_state and is_peptide: #close the peptide
+        elif p == stop_state and is_peptide:
             is_peptide = False
-            seq_peptides.append((peptide_start +offset, pos +offset))
-        else:
-            pass # for positions that are not start_state or stop_state, do nothing.
+            seq_peptides.append((peptide_start + offset, pos + offset))
 
-    # close the last peptide if same as sequence end.
     if is_peptide:
-        seq_peptides.append((peptide_start +offset,pos +offset))
-        
+        seq_peptides.append((peptide_start + offset, pos + offset))
+
     return seq_peptides
 
 
-def parse_coordinate_string(coordinate_string: str, merge_overlaps: bool=True) -> List[Tuple[int,int]]:
-    
-    peptides = []
-    coordinates = coordinate_string.split(',')
-    
-    if coordinate_string == '':
+def parse_coordinate_string(coordinate_string: str) -> List[Tuple[int, int]]:
+    if not coordinate_string:
         return []
-    # Cases to handle
-    # --------------------111111111-------- 
-    # ----------------11111111------------- N-terminal overlap
-    # ---------------------111------------- inside of peptide
-    # ----------------1111111111111111----- contains peptide
-    # -----------------------------111111-- C-terminal overlap
-    coordinates_parsed = []
-    for coords in coordinates:
+    result = []
+    for coords in coordinate_string.split(','):
         s, e = coords.split('-')
-        s, e = s.lstrip('('), e.rstrip(')')
-        coordinates_parsed.append((int(s), int(e)))
-
-    # start to end, long to short.
-    sort_fn = lambda x: (x[0], -(x[1]-x[0]))
-    coordinates_sorted = sorted(coordinates_parsed, key = sort_fn)
-
-    coordinates_merged = []
-    if merge_overlaps:
-        previous_end = -1
-        previous_start = -1
-        for start, end in coordinates_sorted:
-            if start>=previous_end:
-                # the new start position comes after the previous end. 
-                # Save the old one and open a new peptide.
-                coordinates_merged.append([previous_start, previous_end])
-
-                previous_start = start
-                previous_end = end
-            else:
-                # the new start position is contained in the previous peptide.
-                # continue the previous peptide.
-                previous_end = max(previous_end, end) # either expand or keep prev if this one is smaller
-        
-        # handle the last peptide.
-        coordinates_merged.append([previous_start, previous_end])
-
-        return coordinates_merged[1:] # we add (-1,-1) to the list in the loop.
-
-    else:
-        return coordinates_sorted
+        result.append((int(s.lstrip('(')), int(e.rstrip(')'))))
+    return result
 
 
-
-def get_counts_for_protein(true_start_stop: List[Tuple[int,int]], pred_start_stop: List[Tuple[int,int]], tolerance: int =3) -> Tuple[int,int,int]:
-    '''
-    Counts the true positives, false negatives and false positives for one peptide backbone.
-    This function handles overlapping annotations by treating the full overlap group as "one peptide"
-    during counting (=matched if any of the constituent peptides matched)
-    '''
-
-    # Cases where the code below fails.
-    # Pred peptides empty.
+def get_counts_for_protein(
+    true_start_stop: List[Tuple[int, int]],
+    pred_start_stop: List[Tuple[int, int]],
+    tolerance: int = 3,
+) -> Tuple[int, int, int]:
     if len(pred_start_stop) == 0:
         return 0, len(true_start_stop), 0
-    # True peptides empty
     if len(true_start_stop) == 0:
         return 0, 0, len(pred_start_stop)
-    
 
-    # 1. cluster the true peptides and iterate true peptide clusters.
-    # A cluster is a group of overlapping peptides.
-    # A cluster can only contribute one count, even if there are multiple peptides.
-    # Because the models cannot handle overlaps, getting any of the overlapping peptides out is "good enough"
     starts, stops = zip(*true_start_stop)
-    true_df = pd.DataFrame([starts, stops], index = ['start', 'stop']).T
+    true_df = pd.DataFrame({'start': starts, 'stop': stops})
     true_df = true_df.sort_values(['start', 'stop'], ascending=[True, False])
-    true_df['group'] = (true_df['stop'].cummax().shift() < true_df['start']).cumsum()
+    true_df['group']   = (true_df['stop'].cummax().shift() < true_df['start']).cumsum()
     true_df['matched'] = False
 
     starts, stops = zip(*pred_start_stop)
-    pred_df = pd.DataFrame([starts, stops], index = ['start', 'stop']).T
+    pred_df = pd.DataFrame({'start': starts, 'stop': stops})
     pred_df['matched'] = False
 
-    for idx, row in true_df.iterrows():
-        true_start, true_stop = row['start'], row['stop']
+    for ti, trow in true_df.iterrows():
+        for pi, prow in pred_df.iterrows():
+            if (trow.start - tolerance <= prow.start <= trow.start + tolerance and
+                    trow.stop  - tolerance <= prow.stop  <= trow.stop  + tolerance):
+                true_df.loc[ti, 'matched'] = True
+                pred_df.loc[pi, 'matched'] = True
+                break
 
-        for idx, row in pred_df.iterrows():
-            pred_start, pred_stop = row['start'], row['stop']
-            start_match = pred_start >= true_start-tolerance and pred_start <= true_start + tolerance
-            stop_match = pred_stop >= true_stop-tolerance and pred_stop <= true_stop + tolerance
-            if start_match and stop_match:
-                true_df.loc[idx, 'matched'] = True
-                pred_df.loc[idx, 'matched'] = True
-                break # no need to check rest. peptide need only match one.
-
-    
-    
-    # collapse groups. only one need to be matched per group.
     true_matched = true_df.groupby('group')['matched'].any()
-
-    tp = true_matched.sum() # tp = count matched True groups
-    fn = len(true_matched) - tp # fn = count non-matched True groups
-    fp = (~pred_df['matched']).sum() # fp = count non-matched Pred
-
+    tp = int(true_matched.sum())
+    fn = int(len(true_matched) - tp)
+    fp = int((~pred_df['matched']).sum())
     return tp, fn, fp
 
 
-def compute_peptide_finding_metrics(true_start_stop: List[List[Tuple[int,int]]], pred_start_stop: List[List[Tuple[int,int]]], tolerance: int = 3, suffix: str = ''):
-    '''Compute per-peptide precision/recall at a given cleavage site tolerance.
-    This is very inefficient as we don't assume the peptides to be sorted in any meaningful order for now.
-
-    Precision: recovered peptides/ predicted peptides
-    Recall:    recovered peptides/ true peptides
-    '''
+def compute_peptide_finding_metrics(
+    true_start_stop: List[List[Tuple[int, int]]],
+    pred_start_stop: List[List[Tuple[int, int]]],
+    tolerance: int = 3,
+) -> Tuple[float, float, float]:
     assert len(true_start_stop) == len(pred_start_stop)
-    true_positives = 0
-    false_negatives = 0
-    false_positives = 0
-    for true_peptides, predicted_peptides in zip(true_start_stop, pred_start_stop): #iterates over proteins in batch.
-        tp, fn, fp = get_counts_for_protein(true_peptides, predicted_peptides, tolerance)
-        true_positives += tp
-        false_negatives += fn
-        false_positives += fp
-    
+    tp = fn = fp = 0
+    for t, p in zip(true_start_stop, pred_start_stop):
+        _tp, _fn, _fp = get_counts_for_protein(t, p, tolerance)
+        tp += _tp; fn += _fn; fp += _fp
 
-    precision = true_positives/(true_positives+false_positives)
-    recall = true_positives/(true_positives+false_negatives)
-    f1 = (2 * precision * recall) / (precision+recall) if (precision+recall) >0 else 0
-
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = (2 * precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
     return precision, recall, f1
 
 
-def get_confusion_for_protein(true_start_stop: List[Tuple[int,int]], pred_start_stop: List[Tuple[int,int]], true_types: List[str], pred_types: List[str], tolerance: int =3):
-    '''
-    Counts the true positives, false negatives and false positives for one peptide backbone.
-    This function handles overlapping annotations by treating the full overlap group as "one peptide"
-    during counting (=matched if any of the constituent peptides matched)
-    '''
-    # Cases where the code below fails.
-    # Pred peptides empty.
-    if len(pred_start_stop) == 0:
-        starts, stops = zip(*true_start_stop)
-        true_df = pd.DataFrame([starts, stops, true_types], index = ['start', 'stop', 'type']).T
-        true_df['true'] = true_df['type']
-        true_df['pred'] = None
-        return true_df[['start', 'stop', 'true', 'pred']]
-    # True peptides empty
-    if len(true_start_stop) == 0:
-        starts, stops = zip(*pred_start_stop)
-        pred_df = pd.DataFrame([starts, stops, pred_types], index = ['start', 'stop', 'type']).T
-        pred_df['true'] = None
-        pred_df['pred'] = pred_df['type']
-        return pred_df[['start', 'stop', 'true', 'pred']]
+def score_one_model(pickle_path: str, true_df: pd.DataFrame) -> List[dict]:
+    '''Load one test_outputs pickle and compute metrics at tolerances 0–3.'''
+    with open(pickle_path, 'rb') as f:
+        probs, preds, labels, names = pickle.load(f)
 
+    propeptide_borders = [
+        convert_path_to_peptide_borders(
+            pred,
+            start_state=PROPEPTIDE_START_STATE,
+            stop_state=PROPEPTIDE_END_STATE,
+            offset=1,
+        )
+        for pred in preds
+    ]
 
-    # 1. cluster the true peptides and iterate true peptide clusters.
-    # A cluster is a group of overlapping peptides.
-    # A cluster can only contribute one count, even if there are multiple peptides.
-    # Because the models cannot handle overlaps, getting any of the overlapping peptides out is "good enough"
-    starts, stops = zip(*true_start_stop)
-    true_df = pd.DataFrame([starts, stops, true_types], index = ['start', 'stop', 'type']).T
-    true_df = true_df.sort_values(['start', 'stop'], ascending=[True, False])
-    true_df['group'] = (true_df['stop'].cummax().shift() < true_df['start']).cumsum()
-    true_df['matched'] = False
-    true_df['match_type'] = 'None' # column type str.
+    prediction_df = pd.DataFrame({'pred_propeptides': propeptide_borders}, index=names)
+    df = prediction_df.join(true_df[['true_propeptides']])
 
-    starts, stops = zip(*pred_start_stop)
-    pred_df = pd.DataFrame([starts, stops, pred_types], index = ['start', 'stop', 'type']).T
-    pred_df['matched'] = False
-    pred_df['match_type'] = 'None'
-
-
-    for idx, row in true_df.iterrows():
-        true_start, true_stop, true_type = row['start'], row['stop'], row['type']
-
-        for idx, row in pred_df.iterrows():
-            pred_start, pred_stop, pred_type = row['start'], row['stop'], row['type']
-            start_match = pred_start >= true_start-tolerance and pred_start <= true_start + tolerance
-            stop_match = pred_stop >= true_stop-tolerance and pred_stop <= true_stop + tolerance
-            if start_match and stop_match:
-                true_df.loc[idx, 'matched'] = True
-                pred_df.loc[idx, 'matched'] = True
-                true_df.loc[idx, 'match_type'] = pred_type
-                pred_df.loc[idx, 'match_type'] = pred_type
-                break # no need to check rest. peptide need only match one.
-
-    
-    # now we can simplify this to a "normal" classification result
-
-    true_df['true'] = true_df['type']
-    true_df['pred'] = true_df['match_type']
-
-    pred_df['true'] = 'None'
-    pred_df['pred'] = pred_df['type']
-
-    pred_df = pred_df.loc[~pred_df['matched']]
-
-    df_out = pd.concat([true_df, pred_df])[['start', 'stop', 'true', 'pred']]
-    return df_out
-    
-
-def compute_table_for_confusion(df):
-    '''Get a table that has true/pred for each peptide.'''
-    trues = (df['true_peptides'] + df['true_propeptides']).tolist()
-    preds = (df['pred_peptides'] + df['pred_propeptides']).tolist()
-
-    true_types = (df['true_peptides'].apply(lambda x: ['Peptide' for y in x]) + df['true_propeptides'].apply(lambda x: ['Propeptide' for y in x])).tolist()
-    pred_types = (df['pred_peptides'].apply(lambda x: ['Peptide' for y in x]) + df['pred_propeptides'].apply(lambda x: ['Propeptide' for y in x])).tolist()
-
-    dfs = []
-
-    for protein_name, true_peptides, predicted_peptides, true_peptide_types, pred_peptide_types in zip(df.index, trues, preds, true_types, pred_types):
-        assert len(true_peptides) == len(true_peptide_types)
-        assert len(predicted_peptides) == len(pred_peptide_types)
-
-        df_prot = get_confusion_for_protein(true_peptides, predicted_peptides, true_peptide_types, pred_peptide_types, tolerance=3)
-        df_prot['protein'] = protein_name
-        dfs.append(df_prot)
-
-    df = pd.concat(dfs)
-
-    return df
-
-
-    
-
-def score_one_model(predictions_file, true_df):
-    data = pickle.load(open(predictions_file, 'rb'))
-    probs, preds, labels, names = data
-    peptide_borders = [convert_path_to_peptide_borders(pred, start_state=1, stop_state=50, offset=1) for pred in preds]
-    propeptide_borders = [convert_path_to_peptide_borders(pred, start_state=51, stop_state=100, offset=1) for pred in preds]
-
-    prediction_df = pd.DataFrame({'pred_peptides': peptide_borders, 'pred_propeptides': propeptide_borders}, index=names)
-
-    df = prediction_df.join(true_df[['true_peptides', 'true_propeptides', 'organism']])
-
-    peptide_prediction_df = compute_table_for_confusion(df)
-    
     metrics = []
-    for tolerance in [0,1,2,3]:
-        true = df['true_peptides'].tolist()
-        pred = df['pred_peptides'].tolist()
-        prec_pep, rec_pep, f1_pep = compute_peptide_finding_metrics(true, pred, tolerance=tolerance)
-        true = df['true_propeptides'].tolist()
-        pred = df['pred_propeptides'].tolist()
-        prec_pro, rec_pro, f1_pro = compute_peptide_finding_metrics(true, pred, tolerance=tolerance)
-        true = (df['true_peptides'] + df['true_propeptides']).tolist()
-        pred = (df['pred_peptides'] + df['pred_propeptides']).tolist()
-        prec_all, rec_all, f1_all = compute_peptide_finding_metrics(true, pred, tolerance=tolerance)
-
+    for tolerance in [0, 1, 2, 3]:
+        prec, rec, f1 = compute_peptide_finding_metrics(
+            df['true_propeptides'].tolist(),
+            df['pred_propeptides'].tolist(),
+            tolerance=tolerance,
+        )
         metrics.append({
-            'precision peptides': prec_pep,
-            'recall peptides': rec_pep,
-            'f1 peptides': f1_pep,
-            'precision propeptides': prec_pro,
-            'recall propeptides': rec_pro,
-            'f1 propeptides': f1_pro,
-            'precision all': prec_all,
-            'recall all': rec_all,
-            'f1 all': f1_all,
+            'tolerance':              tolerance,
+            'precision propeptides':  prec,
+            'recall propeptides':     rec,
+            'f1 propeptides':         f1,
         })
-    
-    return metrics, peptide_prediction_df
+    return metrics
+
+
+def discover_pickle_files(out_dir: str) -> List[str]:
+    '''Return all test_outputs_outer*_inner*.pickle files in out_dir, sorted.'''
+    files = sorted(
+        os.path.join(out_dir, f)
+        for f in os.listdir(out_dir)
+        if f.startswith('test_outputs_outer') and f.endswith('.pickle')
+    )
+    return files
+
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--out_dir',   required=True,
+                        help='Directory written by train_loop_crf.py (contains *.pickle files)')
+    parser.add_argument('--data_file', default='data/labeled_sequences.csv',
+                        help='CSV with protein_id index and propeptide_coordinates column')
+    parser.add_argument('--save_csv',  default=True, action=argparse.BooleanOptionalAction,
+                        help='Write CSV result files alongside the pickle directory')
+    args = parser.parse_args()
 
-    # for each model, I want (prec, recall, f1) * (0,1,2,3) * (pep, propep, merged)
+    # ---- Load ground truth ----
+    df = pd.read_csv(args.data_file, index_col='protein_id')
+    df = df.fillna('')
+    df['true_propeptides'] = df['propeptide_coordinates'].apply(parse_coordinate_string)
 
-    df = pd.read_csv('../data/uniprot_12052022_cv_5_50/labeled_sequences.csv', index_col='protein_id')
-    df = df.fillna('') # empty coordinates would become nan.
-    coordinate_strings = df['coordinates'].tolist()
-    propeptide_coordinate_strings = df['propeptide_coordinates'].tolist()
-    coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in coordinate_strings]
-    propeptide_coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in propeptide_coordinate_strings]
-    df['true_peptides'] = coordinates
-    df['true_propeptides'] = propeptide_coordinates
+    # ---- Discover model outputs ----
+    pickle_files = discover_pickle_files(args.out_dir)
+    if not pickle_files:
+        raise FileNotFoundError(
+            f'No test_outputs_outer*_inner*.pickle files found in {args.out_dir}.\n'
+            'Run train_loop_crf.py first to generate them.'
+        )
+    print(f'Found {len(pickle_files)} model output files.')
 
-    peptide_prediction_dfs = []
-    metrics_dfs = []
-    for checkpoint in tqdm(BEST_CHECKPOINTS):
+    # ---- Score each model ----
+    all_metrics = []
+    for pkl in tqdm(pickle_files):
+        model_name = os.path.basename(pkl).replace('.pickle', '')
+        metrics = score_one_model(pkl, df)
+        for m in metrics:
+            m['model'] = model_name
+        all_metrics.extend(metrics)
 
-        metrics, peptide_prediction_df = score_one_model(os.path.join(checkpoint, 'test_outputs.pickle'), df)
-        metrics_df = pd.DataFrame.from_dict(metrics)
-        metrics_df.index = pd.MultiIndex.from_product([metrics_df.index, [checkpoint]], names=['tolerance', 'model'])
-        metrics_dfs.append(metrics_df)
+    metrics_df = pd.DataFrame(all_metrics).set_index(['tolerance', 'model'])
 
-        peptide_prediction_df['model'] = checkpoint
-        peptide_prediction_dfs.append(peptide_prediction_df)
+    # ---- Aggregate ----
+    means = metrics_df.groupby(level='tolerance').mean()
+    stds  = metrics_df.groupby(level='tolerance').std()
 
-    
-    metrics_df = pd.concat(metrics_dfs).sort_index()
+    print('\n=== Mean metrics across all models ===')
+    for tol in [0, 1, 2, 3]:
+        row = means.loc[tol]
+        sd  = stds.loc[tol]
+        print(
+            f'  tolerance={tol}  '
+            f'F1={row["f1 propeptides"]:.4f}±{sd["f1 propeptides"]:.4f}  '
+            f'P={row["precision propeptides"]:.4f}  '
+            f'R={row["recall propeptides"]:.4f}'
+        )
 
-    peptide_prediction_df = pd.concat(peptide_prediction_dfs).set_index(['model', 'protein', 'start', 'stop'])
-    peptide_prediction_df.to_csv('peptide_predictions_esm2_l33_balancedsplit.csv')
-    
-    means = metrics_df.groupby(level=0).mean()
-    means.to_csv('crf_model_means_esm2_l33_balancedsplit.csv')
-    metrics_df.to_csv('crf_model_all_cv_esm2_l33_balancedsplit.csv')
+    if args.save_csv:
+        out_csv     = os.path.join(args.out_dir, 'metrics_per_model.csv')
+        out_csv_agg = os.path.join(args.out_dir, 'metrics_aggregated.csv')
+        metrics_df.to_csv(out_csv)
+        means.to_csv(out_csv_agg)
+        print(f'\nSaved:\n  {out_csv}\n  {out_csv_agg}')
 
 
 if __name__ == '__main__':

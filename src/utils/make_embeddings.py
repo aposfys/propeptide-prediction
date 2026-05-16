@@ -39,7 +39,7 @@ def _read_fasta(fasta_file):
 
 
 from tqdm.auto import tqdm
-def generate_esm_embeddings(fasta_file, esm_embeddings_dir, repr_layers=33):
+def generate_esm_embeddings(fasta_file, esm_embeddings_dir):
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
 
@@ -87,7 +87,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
 
-    generate_esm_embeddings(args.fasta_file, args.output_dir, repr_layers=33)
+    generate_esm_embeddings(args.fasta_file, args.output_dir)
 
 if __name__ == '__main__':
     main()
