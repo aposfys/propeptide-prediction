@@ -151,24 +151,16 @@ class CRFBaseModel(nn.Module):
             return probs, viterbi_paths, path_probs
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
+        '''Embed a single sequence with ESM3. Returns (L, 1536) on CPU.'''
         from esm.models.esm3 import ESM3
         from esm.sdk.api import ESMProtein
-        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
-        esm_model.to(device)
-
+        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval().to(device)
         protein = ESMProtein(sequence=sequence)
         encoded = esm_model.encode(protein)
-        
-        if device.type == 'cuda':
-            for k, v in encoded.items():
-                if isinstance(v, torch.Tensor):
-                    encoded[k] = v.to(device=device, non_blocking=True)
-        
         with torch.no_grad():
-            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0))
-        seq_embedding = out.embeddings[0, 1:-1]
-        return seq_embedding
+            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
+        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS
 
     def predict_from_sequence(self, sequence: str, top_k: int = 5):
         self.eval()
