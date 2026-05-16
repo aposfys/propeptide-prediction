@@ -130,13 +130,7 @@ class CRFBaseModel(nn.Module):
                     encoded[k] = v.to(device=device, non_blocking=True)
         
         with torch.no_grad():
-            out = esm_model(
-                sequence_tokens=encoded.sequence_tokens,
-                structure_tokens=encoded.structure_tokens if hasattr(encoded, 'structure_tokens') else None,
-                ss8_tokens=encoded.ss8_tokens if hasattr(encoded, 'ss8_tokens') else None,
-                sasa_tokens=encoded.sasa_tokens if hasattr(encoded, 'sasa_tokens') else None,
-                function_tokens=encoded.function_tokens if hasattr(encoded, 'function_tokens') else None,
-            )
+            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0))
         seq_embedding = out.embeddings[0, 1:-1]
         return seq_embedding
 

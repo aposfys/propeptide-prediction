@@ -198,6 +198,10 @@ def run_training_for_params(
     best_val_metrics = None
     patience_counter = 0
 
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=3, min_lr=1e-6,
+    )
+
     for epoch in range(args.epochs):
         train_loss, _, _, _, _ = run_dataloader(train_loader, model, optimizer, writer, do_train=True)
 
@@ -211,21 +215,30 @@ def run_training_for_params(
         )[0]
 
         score = valid_metrics['f1 propeptides']
+        scheduler.step(score)
         writer.add_scalar('Valid/f1_propeptides', score, global_step=epoch)
+        current_lr = optimizer.param_groups[0]['lr']
 
-        marker = '*' if score > best_score else ' '
-        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={score:.4f}  best={max(best_score, score):.4f}  patience={patience_counter}/{args.patience}', flush=True)
-
-        if score > best_score:
+        improved = score > best_score
+        if improved:
             best_score = score
             best_val_metrics = {**valid_metrics, 'epoch': epoch}
             torch.save(model.state_dict(), checkpoint_path)
             patience_counter = 0
         else:
             patience_counter += 1
-            if patience_counter >= args.patience:
-                print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
-                break
+
+        marker = '*' if improved else ' '
+        print(
+            f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  '
+            f'val_f1={score:.4f}  best={best_score:.4f}  '
+            f'patience={patience_counter}/{args.patience}  lr={current_lr:.2e}',
+            flush=True,
+        )
+
+        if patience_counter >= args.patience:
+            print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
+            break
 
     return best_val_metrics, best_score
 
@@ -249,13 +262,19 @@ def objective(
         sequences are padded to their longest member (1536 × L × batch).
       - weight_decay is searched to regularize against the richer ESM3 features.
     '''
-    args.lr           = trial.suggest_float('lr', 1e-5, 1e-3, log=True)
-    args.dropout      = trial.suggest_float('dropout', 0.0, 0.5)
-    args.conv_dropout = trial.suggest_float('conv_dropout', 0.0, 0.5)
-    args.weight_decay = trial.suggest_float('weight_decay', 1e-6, 1e-3, log=True)
-    args.num_filters  = trial.suggest_categorical('num_filters', [32, 64, 128])
-    args.hidden_size  = trial.suggest_categorical('hidden_size', [32, 64, 128])
-    args.batch_size   = trial.suggest_categorical('batch_size', [16, 32, 64])
+    # ESM3 (1536-dim) produces richer features than ESM2 (1280-dim).
+    # - num_filters/hidden_size floor raised to 64: 32 filters are too narrow
+    #   to project 1536-dim features usefully.
+    # - batch_size floor raised to 32: batch=16 causes unstable gradients with
+    #   variable-length padded sequences and high-LR configs.
+    # - weight_decay lower bound raised to 1e-5: 1e-6 is effectively no reg.
+    args.lr           = trial.suggest_float('lr', 1e-5, 5e-4, log=True)
+    args.dropout      = trial.suggest_float('dropout', 0.0, 0.4)
+    args.conv_dropout = trial.suggest_float('conv_dropout', 0.0, 0.4)
+    args.weight_decay = trial.suggest_float('weight_decay', 1e-5, 1e-3, log=True)
+    args.num_filters  = trial.suggest_categorical('num_filters', [64, 128, 256])
+    args.hidden_size  = trial.suggest_categorical('hidden_size', [64, 128, 256])
+    args.batch_size   = trial.suggest_categorical('batch_size', [32, 64])
     args.kernel_size  = trial.suggest_categorical('kernel_size', [3, 5, 7])
 
     inner_scores = []
