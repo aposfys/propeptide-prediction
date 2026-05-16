@@ -35,15 +35,12 @@ def _focal_loss_on_emissions(
     total = n_pos + n_neg
     alpha_t = binary * (n_neg / total) + (1 - binary) * (n_pos / total)
 
-    # Numerically stable focal loss via log-sigmoid
-    logit = raw_emissions[..., 1]                         # propeptide logit
-    log_p    = F.logsigmoid(logit)                        # log P(propeptide)
-    log_1mp  = F.logsigmoid(-logit)                       # log P(background)
-    p        = log_p.exp()
-
-    p_t      = binary * p + (1 - binary) * (1 - p)
-    log_p_t  = binary * log_p + (1 - binary) * log_1mp
-    focal    = -alpha_t * (1 - p_t).pow(gamma) * log_p_t
+    # Softmax over both logits — consistent with how _repeat_emissions feeds the CRF.
+    # log_softmax[..., 1] = log P(propeptide), [..0] = log P(background).
+    log_sm  = F.log_softmax(raw_emissions, dim=-1)        # (batch, L, 2)
+    log_p_t = log_sm.gather(-1, binary.long().unsqueeze(-1)).squeeze(-1)
+    p_t     = log_p_t.exp()
+    focal   = -alpha_t * (1 - p_t).pow(gamma) * log_p_t
 
     return (focal * mask_f).sum() / mask_f.sum().clamp(min=1.0)
 
