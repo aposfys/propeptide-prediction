@@ -273,6 +273,7 @@ def objective(
     args: argparse.Namespace,
     outer_train_partitions: List[int],
     outer_fold: int,
+    optuna_epochs: int,
 ) -> float:
     '''4-fold inner CV objective for Optuna hyperparameter search.
 
@@ -310,33 +311,37 @@ def objective(
     args.conv_dropout = args.dropout  # tie the two dropout rates
 
     inner_scores = []
+    orig_epochs = args.epochs
+    args.epochs = optuna_epochs  # use shorter budget for HP search
 
-    for inner_i, inner_val in enumerate(outer_train_partitions):
-        inner_train = [p for p in outer_train_partitions if p != inner_val]
-        train_loader, valid_loader, _ = get_dataloaders(
-            args, inner_train, [inner_val], [inner_val],
-        )
-        model = get_model(args).to(device)
-        _flatten_lstm_if_present(model)
-        optimizer = Adam(model.parameters(), lr=args.lr,
-                         weight_decay=args.weight_decay)
-        ckpt = os.path.join(
-            args.out_dir,
-            f'tmp_outer{outer_fold}_trial{trial.number}_inner{inner_i}.pt',
-        )
-        writer = SummaryWriter(
-            os.path.join(args.out_dir, f'trial{trial.number}_outer{outer_fold}_inner{inner_i}')
-        )
+    try:
+        for inner_i, inner_val in enumerate(outer_train_partitions):
+            inner_train = [p for p in outer_train_partitions if p != inner_val]
+            train_loader, valid_loader, _ = get_dataloaders(
+                args, inner_train, [inner_val], [inner_val],
+            )
+            model = get_model(args).to(device)
+            _flatten_lstm_if_present(model)
+            optimizer = Adam(model.parameters(), lr=args.lr,
+                             weight_decay=args.weight_decay)
+            ckpt = os.path.join(
+                args.out_dir,
+                f'tmp_outer{outer_fold}_trial{trial.number}_inner{inner_i}.pt',
+            )
+            writer = SummaryWriter(
+                os.path.join(args.out_dir, f'trial{trial.number}_outer{outer_fold}_inner{inner_i}')
+            )
 
-        _, score = run_training_for_params(
-            args, model, train_loader, valid_loader, optimizer, writer, ckpt,
-        )
-        inner_scores.append(score)
-        writer.close()
+            _, score = run_training_for_params(
+                args, model, train_loader, valid_loader, optimizer, writer, ckpt,
+            )
+            inner_scores.append(score)
+            writer.close()
 
-        # Remove the temporary checkpoint to save disk space
-        if os.path.exists(ckpt):
-            os.remove(ckpt)
+            if os.path.exists(ckpt):
+                os.remove(ckpt)
+    finally:
+        args.epochs = orig_epochs  # always restore so retraining uses full epoch budget
 
     return float(np.mean(inner_scores))
 
@@ -351,14 +356,25 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
 
     Outer loop  : 5 folds, each with 1 test partition and 4 training partitions.
     Inner loop  : Optuna optimizes hyperparameters via 4-fold CV on the outer
-                  training partitions.
+                  training partitions (using --optuna_epochs epochs).
     Models saved: all 4 inner-fold models per outer fold → 5×4 = 20 models for
                   ensemble inference.
+
+    Use --outer_fold N (0-4) to run a single fold in parallel with other processes.
     '''
+    if args.num_cpu_threads:
+        torch.set_num_threads(args.num_cpu_threads)
+        print(f'PyTorch CPU threads: {args.num_cpu_threads}', flush=True)
+
+    optuna_epochs = args.optuna_epochs if args.optuna_epochs else args.epochs
+
     all_partitions = list(range(5))
     all_outer_results = []
 
-    for outer_fold in range(5):
+    # Allow running a single outer fold (for parallel execution across processes).
+    fold_range = [args.outer_fold] if args.outer_fold is not None else range(5)
+
+    for outer_fold in fold_range:
         print(f'\n=== Outer fold {outer_fold} ===')
         test_partition = [outer_fold]
         outer_train_partitions = [p for p in all_partitions if p != outer_fold]
@@ -368,7 +384,7 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
 
         def _objective_with_log(trial):
             print(f'\n--- Outer {outer_fold} | Trial {trial.number+1}/{args.n_trials} ---', flush=True)
-            score = objective(trial, args, outer_train_partitions, outer_fold)
+            score = objective(trial, args, outer_train_partitions, outer_fold, optuna_epochs)
             print(f'    Trial {trial.number+1} score: {score:.4f}', flush=True)
             return score
 
@@ -380,6 +396,7 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         print(f'Best hyperparameters (outer fold {outer_fold}):', best_params)
         for k, v in best_params.items():
             setattr(args, k, v)
+        args.conv_dropout = args.dropout  # conv_dropout is tied to dropout but not in best_params
 
         json.dump(
             best_params,
@@ -441,20 +458,29 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
 
         all_outer_results.extend(outer_fold_test_metrics)
 
-    # ---- Aggregate results across all 20 models ----
-    f1_scores = [m['f1 propeptides'] for m in all_outer_results]
-    summary = {
-        'mean_f1_propeptides': float(np.mean(f1_scores)),
-        'std_f1_propeptides':  float(np.std(f1_scores)),
-        'n_models': len(all_outer_results),
-        'per_model': all_outer_results,
-    }
-    json.dump(summary, open(os.path.join(args.out_dir, 'nested_cv_summary.json'), 'w'), indent=2)
-    print(
-        f'\nNested CV complete. '
-        f'Mean propeptide F1 = {summary["mean_f1_propeptides"]:.4f} '
-        f'± {summary["std_f1_propeptides"]:.4f}'
-    )
+    # ---- Aggregate results (only when all 5 folds ran in this process) ----
+    if args.outer_fold is None:
+        f1_scores = [m['f1 propeptides'] for m in all_outer_results]
+        summary = {
+            'mean_f1_propeptides': float(np.mean(f1_scores)),
+            'std_f1_propeptides':  float(np.std(f1_scores)),
+            'n_models': len(all_outer_results),
+            'per_model': all_outer_results,
+        }
+        json.dump(summary, open(os.path.join(args.out_dir, 'nested_cv_summary.json'), 'w'), indent=2)
+        print(
+            f'\nNested CV complete. '
+            f'Mean propeptide F1 = {summary["mean_f1_propeptides"]:.4f} '
+            f'± {summary["std_f1_propeptides"]:.4f}'
+        )
+    else:
+        f1_scores = [m['f1 propeptides'] for m in all_outer_results]
+        print(
+            f'\nOuter fold {args.outer_fold} complete. '
+            f'Mean test F1 = {np.mean(f1_scores):.4f}. '
+            f'Run evaluation/measure_performance.py once all 5 folds finish.'
+        )
+        summary = {'outer_fold': args.outer_fold, 'per_model': all_outer_results}
     return summary
 
 
@@ -482,8 +508,16 @@ def parse_arguments() -> argparse.Namespace:
     p.add_argument('--batch_size', '-bs', type=int, default=64)
     p.add_argument('--n_trials', type=int, default=50,
                    help='Number of Optuna trials per outer fold.')
-    p.add_argument('--num_workers', type=int, default=2,
-                   help='DataLoader worker processes (use 0 for in-process loading).')
+    p.add_argument('--num_workers', type=int, default=0,
+                   help='DataLoader workers. 0 (default) keeps embeddings cached in main process.')
+    p.add_argument('--outer_fold', type=int, default=None, choices=[0, 1, 2, 3, 4],
+                   help='Run only this outer fold. Omit to run all 5 sequentially.')
+    p.add_argument('--num_cpu_threads', type=int, default=None,
+                   help='torch.set_num_threads(). Set to ~(total_cores/5) when running folds in parallel.')
+    p.add_argument('--optuna_epochs', type=int, default=None,
+                   help='Max epochs for Optuna HP search (default: same as --epochs). '
+                        'Use 35 to cover the typical phase-transition zone (~22-30 epochs) '
+                        'while saving ~30%% vs full 50 epochs. Retraining always uses --epochs.')
 
     p.add_argument('--use_focal', default=True, action=argparse.BooleanOptionalAction,
                    help='Add focal loss on emissions to combat class imbalance (--no-use-focal to disable).')
@@ -499,7 +533,9 @@ def parse_arguments() -> argparse.Namespace:
 
     args = p.parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
-    json.dump(vars(args), open(os.path.join(args.out_dir, 'config.json'), 'w'), indent=3)
+    # Use fold-specific filename when running in parallel to avoid race conditions.
+    cfg_name = f'config_outer{args.outer_fold}.json' if args.outer_fold is not None else 'config.json'
+    json.dump(vars(args), open(os.path.join(args.out_dir, cfg_name), 'w'), indent=3)
     return args
 
 
