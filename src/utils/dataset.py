@@ -287,6 +287,13 @@ class BLOSUMCSVDataset(Dataset):
 
 
 from .crf_label_utils import peptide_list_to_label_sequence, parse_coordinate_string, peptide_list_to_binary_label_sequence
+
+# Process-level embedding cache: path → float32 tensor.
+# Populated lazily on first access; reused for every subsequent epoch, fold, and trial.
+# With num_workers=0 (recommended) this lives in the main process and is fully shared.
+# The first epoch of training still loads all embeddings from disk — subsequent epochs
+# are served from RAM. Expect the first epoch to be noticeably slower than the rest.
+_EMBEDDING_CACHE: dict = {}
 class PrecomputedCSVForCRFDataset(Dataset):
     '''Use together with modified extract.py script. Retrieves seqs via md5 hash.'''
     def __init__(
@@ -467,14 +474,16 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
     def __getitem__(self, index: int):
         seq_hash = self.hashes[index]
         seq_len = len(self.sequences[index])
-        try:
-            embeddings = torch.load(
-                os.path.join(self.embeddings_dir, f'{seq_hash}.pt')
-            ).to(torch.float32)
-        except FileNotFoundError:
-            raise FileNotFoundError(
-                f'Could not find hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.'
-            )
+        pt_path = os.path.join(self.embeddings_dir, f'{seq_hash}.pt')
+
+        if pt_path not in _EMBEDDING_CACHE:
+            try:
+                _EMBEDDING_CACHE[pt_path] = torch.load(pt_path).to(torch.float32)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f'Could not find hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.'
+                )
+        embeddings = _EMBEDDING_CACHE[pt_path]
 
         propeptides = self.propeptides[index]
         label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1, max_len=50)
