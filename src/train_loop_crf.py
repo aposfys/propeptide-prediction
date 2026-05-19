@@ -96,7 +96,8 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     if not is_initiated:
         # when we run in nested CV, we need to do this outside of train() to avoid reinitialization errors.
         url = "tcp://localhost:12355"
-        torch.distributed.init_process_group(backend="nccl", init_method = url, world_size=1, rank=0)
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend=backend, init_method = url, world_size=1, rank=0)
 
 
     # initialize the model with FSDP wrapper
