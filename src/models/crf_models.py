@@ -141,50 +141,21 @@ class CRFBaseModel(nn.Module):
             return probs, viterbi_paths, path_probs
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
+        '''Embed a single sequence with ProstT5. Returns (L, 1024) on CPU.'''
+        from transformers import T5EncoderModel, T5Tokenizer
+        tokenizer = T5Tokenizer.from_pretrained('Rostlab/ProstT5', do_lower_case=False)
+        model = T5EncoderModel.from_pretrained('Rostlab/ProstT5').eval().to(device)
 
+        seq_spaced = ' '.join(list(sequence))
+        ids = tokenizer(['<AA2fold> ' + seq_spaced], return_tensors='pt', add_special_tokens=True)
+        input_ids = ids['input_ids'].to(device)
+        attention_mask = ids['attention_mask'].to(device)
 
-        from esm import pretrained
-        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        batch_converter = esm_alphabet.get_batch_converter()
-        esm_model.to(device)
+        with torch.no_grad():
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-
-        data = [
-            ("protein1", sequence),
-        ]
-        labels, strs, toks = batch_converter(data)
-
-        repr_layers_list = [
-            (i + esm_model.num_layers + 1) % (esm_model.num_layers + 1) for i in range(repr_layers)
-        ]
-
-        out = None
-
-        toks = toks.to(device)
-
-        minibatch_max_length = toks.size(1)
-
-        tokens_list = []
-        end = 0
-        while end <= minibatch_max_length:
-            start = end
-            end = start + 1022
-            if end <= minibatch_max_length:
-                # we are not on the last one, so make this shorter
-                end = end - 300
-            tokens = esm_model(toks[:, start:end], repr_layers=repr_layers_list, return_contacts=False)["representations"][repr_layers - 1]
-            tokens_list.append(tokens)
-
-        out = torch.cat(tokens_list, dim=1).cpu()
-
-        # set nan to zeros
-        out[out!=out] = 0.0
-
-        res = out.transpose(0,1)[1:-1] 
-        seq_embedding = res[:,0]
-
-        return seq_embedding
+        return out.last_hidden_state[0, 1:-1].cpu()  # strip BOS/EOS → (L, 1024)
 
     def predict_from_sequence(self, sequence: str, top_k: int = 5):
         self.eval()
