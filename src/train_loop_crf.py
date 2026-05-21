@@ -36,9 +36,9 @@ def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1
     print(f'Loaded data. {len(train_set)} train sequences (p.{train_partitions}), {len(valid_set)} validation sequences (p.{valid_partitions}), {len(test_set)} test sequences (p.{test_partitions}).')
 
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=False, collate_fn=train_set.collate_fn, num_workers=2)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=train_set.collate_fn, num_workers=0)
+    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, shuffle=False, collate_fn=valid_set.collate_fn, num_workers=0)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, collate_fn=test_set.collate_fn, num_workers=0)
 
     return train_loader, valid_loader, test_loader
 
@@ -73,7 +73,7 @@ def get_model(args: argparse.Namespace):
             hidden_size=args.hidden_size,
             num_labels=2,
             dropout_input=args.dropout,
-            num_states=61,
+            num_states=51,
             n_heads=args.num_filters,
             attn_dropout=args.conv_dropout,
         )
@@ -208,7 +208,7 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
             global_step += 1
         else:
             with torch.no_grad():
-                pos_probs, pos_preds, loss = model(embeddings, mask, label)
+                pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
 
         true.extend(peptides)
         probs.append(pos_probs.detach().cpu().numpy())
