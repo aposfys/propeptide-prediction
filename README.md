@@ -1,7 +1,13 @@
-# DeepPeptide (ProstT5)
-Predicting cleaved peptides in protein sequences using ProstT5.
+# DeepPeptide (ProstT5, propeptide-only)
+Predicting propeptide cleavage sites in protein sequences using ProstT5.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
+
+This branch restricts training and evaluation to the **propeptide label only**
+(states 1–50; state 0 = background). Mature peptide coordinates are ignored.
+The CRF head is hardcoded to 51 states and 2 label classes.
+
+Embedder: `Rostlab/ProstT5` (1024-dim per residue).
 
 ---
 
@@ -24,8 +30,7 @@ Two CSV files are required (already provided under `data/` for the UniProt 2022 
 | column | description |
 |---|---|
 | `sequence` | full precursor amino acid sequence |
-| `coordinates` | peptide coordinates, e.g. `(12-45),(78-102)` |
-| `propeptide_coordinates` | propeptide coordinates in same format |
+| `propeptide_coordinates` | propeptide coordinates, e.g. `(12-45)` |
 | `organism` | organism name or taxon |
 
 **`graphpart_assignments.csv`** (indexed by `AC`):
@@ -70,7 +75,6 @@ python -m src.train_loop_crf \
 | `--embedding_dim` | 1024 | ProstT5 output dimension |
 | `--epochs` | 30 | max training epochs |
 | `--batch_size` | 100 | sequences per batch |
-| `--label_type` | `multistate_with_propeptides` | CRF label scheme |
 | `--model` | `lstmcnncrf` | model architecture |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
 
@@ -79,7 +83,7 @@ Note: `--lr`, `--num_filters`, `--hidden_size`, `--dropout`, `--conv_dropout`,
 at their optimal values by default.
 
 Training writes to `--out_dir`:
-- `model.pt` — best checkpoint (by validation F1)
+- `model.pt` — best checkpoint (by validation propeptide F1)
 - `valid_metrics.json` — validation metrics at best epoch
 - `test_metrics.json` — test metrics
 - TensorBoard logs (run `tensorboard --logdir PATH/TO/OUTPUT`)
