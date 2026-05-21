@@ -141,11 +141,10 @@ class CRFBaseModel(nn.Module):
             return probs, viterbi_paths, path_probs
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
-
-
+    def _esm_embed(sequence: str, device: torch.device, repr_layers: int = 33) -> torch.Tensor:
+        '''Embed a single sequence with ESM-2 (esm2_t33_650M_UR50D). Returns (L, 1280) on CPU.'''
         from esm import pretrained
-        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
+        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm2_t33_650M_UR50D')
         batch_converter = esm_alphabet.get_batch_converter()
         esm_model.to(device)
 
