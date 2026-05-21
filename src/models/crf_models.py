@@ -141,50 +141,16 @@ class CRFBaseModel(nn.Module):
             return probs, viterbi_paths, path_probs
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
-
-
-        from esm import pretrained
-        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        batch_converter = esm_alphabet.get_batch_converter()
-        esm_model.to(device)
-
-
-        data = [
-            ("protein1", sequence),
-        ]
-        labels, strs, toks = batch_converter(data)
-
-        repr_layers_list = [
-            (i + esm_model.num_layers + 1) % (esm_model.num_layers + 1) for i in range(repr_layers)
-        ]
-
-        out = None
-
-        toks = toks.to(device)
-
-        minibatch_max_length = toks.size(1)
-
-        tokens_list = []
-        end = 0
-        while end <= minibatch_max_length:
-            start = end
-            end = start + 1022
-            if end <= minibatch_max_length:
-                # we are not on the last one, so make this shorter
-                end = end - 300
-            tokens = esm_model(toks[:, start:end], repr_layers=repr_layers_list, return_contacts=False)["representations"][repr_layers - 1]
-            tokens_list.append(tokens)
-
-        out = torch.cat(tokens_list, dim=1).cpu()
-
-        # set nan to zeros
-        out[out!=out] = 0.0
-
-        res = out.transpose(0,1)[1:-1] 
-        seq_embedding = res[:,0]
-
-        return seq_embedding
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
+        '''Embed a single sequence with ESM3. Returns (L, 1536) on CPU.'''
+        from esm.models.esm3 import ESM3
+        from esm.sdk.api import ESMProtein
+        esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval().to(device)
+        protein = ESMProtein(sequence=sequence)
+        encoded = esm_model.encode(protein)
+        with torch.no_grad():
+            out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
+        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, top_k: int = 5):
         self.eval()
