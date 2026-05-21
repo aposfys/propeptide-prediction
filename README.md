@@ -1,5 +1,5 @@
-# DeepPeptide
-Predicting cleaved peptides in protein sequences.
+# DeepPeptide (ProstT5)
+Predicting cleaved peptides in protein sequences using ProstT5.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
 
@@ -12,13 +12,6 @@ Predicting cleaved peptides in protein sequences.
 ```bash
 pip install -r requirements.txt
 ```
-
-Then install an embedding library — **choose one**, not both:
-
-| Embedder | Dim | Command |
-|---|---|---|
-| ProstT5 (recommended) | 1024 | `pip install transformers sentencepiece protobuf` |
-| ESM-2 | 1280 | `pip install fair-esm==1.0.2` |
 
 ---
 
@@ -46,10 +39,8 @@ Two CSV files are required (already provided under `data/` for the UniProt 2022 
 ### Step 3 — Precompute embeddings
 
 Embeddings are computed **once** and cached as `.pt` files (one per sequence, named by
-MD5 hash of the sequence string). The training script only reads these files — it never
-calls the embedding model directly. Run **one** of the two scripts below.
+MD5 hash of the sequence). The training script only reads these files.
 
-**ProstT5** (1024-dim, recommended):
 ```bash
 python -m src.utils.make_embeddings_prost5 \
     data/protein_sequences.fasta \
@@ -57,14 +48,7 @@ python -m src.utils.make_embeddings_prost5 \
     --half          # fp16 halves memory; accuracy impact is negligible
 ```
 
-**ESM-2** (1280-dim, original):
-```bash
-python -m src.utils.make_embeddings \
-    data/protein_sequences.fasta \
-    PATH/TO/EMBEDDINGS/
-```
-
-Both scripts skip sequences whose `.pt` file already exists, so it is safe to
+The script skips sequences whose `.pt` file already exists, so it is safe to
 interrupt and resume.
 
 ---
@@ -76,15 +60,14 @@ python -m src.train_loop_crf \
     --embeddings_dir PATH/TO/EMBEDDINGS \
     --data_file data/labeled_sequences.csv \
     --partitioning_file data/graphpart_assignments.csv \
-    --out_dir PATH/TO/OUTPUT \
-    --embedding_dim 1024    # use 1280 if you used ESM-2 in Step 3
+    --out_dir PATH/TO/OUTPUT
 ```
 
 **Key arguments:**
 
 | argument | default | description |
 |---|---|---|
-| `--embedding_dim` | 1280 | must match the embedder: ProstT5=1024, ESM-2=1280 |
+| `--embedding_dim` | 1024 | ProstT5 output dimension |
 | `--epochs` | 30 | max training epochs |
 | `--batch_size` | 100 | sequences per batch |
 | `--label_type` | `multistate_with_propeptides` | CRF label scheme |
