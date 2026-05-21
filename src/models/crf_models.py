@@ -3,8 +3,40 @@ The CRF state space models. Many parameters are hardcoded due to the complexity 
 '''
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .multi_tag_crf import CRF
 from .lstm_cnn import LSTMCNN
+
+
+def _focal_loss_on_emissions(
+    raw_emissions: torch.Tensor,
+    targets: torch.Tensor,
+    mask: torch.Tensor,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    '''Binary focal loss on the 2-logit emissions (background / propeptide).
+
+    Computes inverse-class-frequency alpha weighting from the current batch so
+    it adapts to per-fold propeptide density without a fixed prior.
+
+    raw_emissions : (batch, L, 2)  — before _repeat_emissions
+    targets       : (batch, L)     — CRF state labels; state 0 = background
+    mask          : (batch, L)     — 1 for real positions, 0 for padding
+    '''
+    mask_f = mask.float()
+    binary = (targets > 0).float()
+
+    n_pos = (binary * mask_f).sum().clamp(min=1.0)
+    n_neg = ((1 - binary) * mask_f).sum().clamp(min=1.0)
+    total = n_pos + n_neg
+    alpha_t = binary * (n_neg / total) + (1 - binary) * (n_pos / total)
+
+    log_sm = F.log_softmax(raw_emissions, dim=-1)
+    log_p_t = log_sm.gather(-1, binary.long().unsqueeze(-1)).squeeze(-1)
+    p_t = log_p_t.exp()
+    focal = -alpha_t * (1 - p_t).pow(gamma) * log_p_t
+
+    return (focal * mask_f).sum() / mask_f.sum().clamp(min=1.0)
 
 
 
@@ -114,29 +146,28 @@ class CRFBaseModel(nn.Module):
         return emissions_out
 
 
-    def forward(self, embeddings, mask, targets = None, skip_marginals: bool = False, top_k: int = 1):
+    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False,
+                top_k: int = 1, use_focal: bool = False):
 
-        features = self.feature_extractor(embeddings, mask) # (batch_size, seq_len, feature_dim)
-        emissions = self.features_to_emissions(features) # (batch_size, seq_len, num_labels)
-        emissions = self._repeat_emissions(emissions) # (batch_size, seq_len, num_states)
-        
-        # viterbi_paths = self.crf.decode(emissions=emissions, mask = mask.byte())
+        features = self.feature_extractor(embeddings, mask)
+        raw_emissions = self.features_to_emissions(features)   # (batch, L, 2)
+        emissions = self._repeat_emissions(raw_emissions)      # (batch, L, num_states)
 
-        viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask = mask.byte(), top_k=top_k)
+        viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask=mask.byte(), top_k=top_k)
 
-        #pad the viterbi paths
-        # max_pad_len = max([len(x) for x in viterbi_paths])
-        # pos_preds = [x + [-1]*(max_pad_len-len(x)) for x in viterbi_paths] 
-        # pos_preds = torch.tensor(pos_preds, device = emissions.device) #Tensor conversion is just for compatibility with downstream metric functions
-
-        probs = self.crf.compute_marginal_probabilities(emissions, mask.byte()) if not skip_marginals else torch.softmax(emissions, dim=-1)
+        probs = (self.crf.compute_marginal_probabilities(emissions, mask.byte())
+                 if not skip_marginals else torch.softmax(emissions, dim=-1))
 
         if targets is not None:
-            loss = self.crf(emissions = emissions, tags=targets.long(), mask = mask.byte(), reduction='mean') *-1
-
-            if loss.item()>10000:
+            crf_loss = self.crf(emissions=emissions, tags=targets.long(), mask=mask.byte(), reduction='mean') * -1
+            if crf_loss.item() > 10000:
                 self._debug_crf(targets)
-            return (probs, viterbi_paths, loss)
+            if use_focal:
+                focal = _focal_loss_on_emissions(raw_emissions, targets, mask)
+                loss = crf_loss + 0.1 * focal
+            else:
+                loss = crf_loss
+            return probs, viterbi_paths, loss
         else:
             return probs, viterbi_paths, path_probs
 
