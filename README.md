@@ -95,8 +95,7 @@ These include precision, recall, and F1 for propeptide predictions, computed wit
 ±3-residue boundary tolerance.
 
 The published results were produced by running 5-fold nested CV (5 outer folds × 4 inner folds,
-20 checkpoints total) using `esm3-propeptide-only` branch with Optuna hyperparameter search.
-`evaluation/measure_performance.py` aggregates the saved predictions from those 20 runs — it
+20 checkpoints total), `evaluation/measure_performance.py` aggregates the saved predictions from those 20 runs — it
 requires the original checkpoint directories and cannot be re-run without them.
 
 - PeptideLocator was evaluated as a licensed executable and cannot be provided in this repo.
