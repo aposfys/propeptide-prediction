@@ -71,12 +71,13 @@ python run.py \
 | `--embedding_dim` | 1280 | ESM-2 output dimension |
 | `--epochs` | 30 | max training epochs |
 | `--batch_size` | 100 | sequences per batch |
-| `--model` | `lstmcnncrf` | model architecture |
+| `--model` | `lstmcnncrf` | model architecture (`lstmcnncrf`, `lstmcnncrf_simple`, `selfattentioncrf`) |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
-
-Note: `--lr`, `--num_filters`, `--hidden_size`, `--dropout`, `--conv_dropout`,
-`--kernel_size` were optimised in a nested CV hyperparameter search and are not
-at their optimal values by default.
+| `--lr` | 1e-4 | learning rate |
+| `--dropout` | 0.1 | input and conv dropout |
+| `--num_filters` | 32 | number of CNN filters |
+| `--hidden_size` | 64 | biLSTM hidden size |
+| `--kernel_size` | 3 | CNN kernel size |
 
 Training writes to `--out_dir`:
 - `model.pt` — best checkpoint (by validation propeptide F1)
