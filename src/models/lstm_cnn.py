@@ -18,10 +18,10 @@ class LSTMCNN(nn.Module):
         self.ReLU = nn.ReLU()
 
 
-        self.input_dropout = nn.Dropout2d(p=dropout_input)  # keep_prob=0.75 
+        self.input_dropout = nn.Dropout1d(p=dropout_input)  # keep_prob=0.75
         self.conv1 = nn.Conv1d(in_channels=input_size, out_channels=n_filters,
-                            kernel_size=filter_size, stride=1, padding=filter_size // 2) 
-        self.conv1_dropout = nn.Dropout2d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
+                            kernel_size=filter_size, stride=1, padding=filter_size // 2)
+        self.conv1_dropout = nn.Dropout1d(p=dropout_conv1)  # keep_prob=0.85  # could this dropout be added directly to LSTM
 
         self.biLSTM = nn.LSTM(input_size=n_filters, hidden_size=hidden_size, num_layers=num_lstm_layers,
                             bias=True, batch_first=True, dropout=0.0, bidirectional=True)
