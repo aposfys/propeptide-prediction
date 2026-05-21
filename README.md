@@ -1,11 +1,12 @@
-# DeepPeptide (ESM-2, CPU-compatible)
-Predicting cleaved peptides in protein sequences using ESM-2.
+# DeepPeptide (ESM-2, propeptide-only)
+Predicting propeptide cleavage sites in protein sequences using ESM-2.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
 
-This branch extends the original DeepPeptide with CPU compatibility: the distributed
-backend falls back to `gloo` when no GPU is available, so the full training pipeline
-runs on CPU without modification.
+This branch restricts training and evaluation to the **propeptide label only**
+(states 1–50; state 0 = background). Mature peptide coordinates are ignored.
+The CRF head is hardcoded to 51 states and 2 label classes.
+CPU compatible: the distributed backend falls back to `gloo` when no GPU is available.
 
 Embedder: `esm2_t33_650M_UR50D` (ESM-2, 1280-dim per residue).
 
@@ -30,8 +31,7 @@ Two CSV files are required (already provided under `data/` for the UniProt 2022 
 | column | description |
 |---|---|
 | `sequence` | full precursor amino acid sequence |
-| `coordinates` | peptide coordinates, e.g. `(12-45),(78-102)` |
-| `propeptide_coordinates` | propeptide coordinates in same format |
+| `propeptide_coordinates` | propeptide coordinates, e.g. `(12-45)` |
 | `organism` | organism name or taxon |
 
 **`graphpart_assignments.csv`** (indexed by `AC`):
@@ -71,13 +71,18 @@ python run.py \
 | `--embedding_dim` | 1280 | ESM-2 output dimension |
 | `--epochs` | 30 | max training epochs |
 | `--batch_size` | 100 | sequences per batch |
-| `--label_type` | `multistate_with_propeptides` | CRF label scheme |
 | `--model` | `lstmcnncrf` | model architecture |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
 
 Note: `--lr`, `--num_filters`, `--hidden_size`, `--dropout`, `--conv_dropout`,
 `--kernel_size` were optimised in a nested CV hyperparameter search and are not
 at their optimal values by default.
+
+Training writes to `--out_dir`:
+- `model.pt` — best checkpoint (by validation propeptide F1)
+- `valid_metrics.json` — validation metrics at best epoch
+- `test_metrics.json` — test metrics
+- TensorBoard logs (run `tensorboard --logdir PATH/TO/OUTPUT`)
 
 ---
 
