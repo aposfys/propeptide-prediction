@@ -1,7 +1,3 @@
-from esm.models.esm3 import ESM3
-from esm.sdk.api import ESMProtein
-import os
-pass # remove hardcoded token
 import torch
 import torch.nn as nn
 

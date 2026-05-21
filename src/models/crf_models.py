@@ -1,7 +1,3 @@
-from esm.models.esm3 import ESM3
-from esm.sdk.api import ESMProtein
-import os
-pass # remove hardcoded token
 '''
 The CRF state space models. Many parameters are hardcoded due to the complexity of the CRF configuration.
 '''
@@ -298,9 +294,10 @@ class SimpleLSTMCNNCRF(CRFBaseModel):
 
 
     # redefine forward because no emission repeating.
-    def forward(self, embeddings, mask, targets = None, skip_marginals: bool = False):
-        features = self.feature_extractor(embeddings, mask) # (batch_size, seq_len, feature_dim)
-        emissions = self.features_to_emissions(features) # (batch_size, seq_len, num_labels)
+    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False, use_focal: bool = False):
+        # use_focal accepted for API compatibility with CRFBaseModel; not applied here (simple 2-state CRF)
+        features = self.feature_extractor(embeddings, mask)
+        emissions = self.features_to_emissions(features)
         
         viterbi_paths, probs = self.crf.decode(emissions=emissions, mask = mask.byte())
 
