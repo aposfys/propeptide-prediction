@@ -235,7 +235,7 @@ def parse_arguments():
     p.add_argument('--data_file', '-df', type=str, help='Sequences with Graph-Part headers', default = 'data/uniprot_12052022_cv_5_50/labeled_sequences.csv')
     p.add_argument('--partitioning_file', '-pf', type=str, help='Graph-Part output. Assume train-val-test split.', default = 'data/uniprot_12052022_cv_5_50/graphpart_assignments.csv')
     p.add_argument('--embedding', '-em', type=str, help='Sequence embedding strategy.', default='precomputed')
-    p.add_argument('--embedding_dim', '-ed', type=int, help='Sequence embedding dimension.', default=1280)
+    p.add_argument('--embedding_dim', '-ed', type=int, help='Sequence embedding dimension (ESM3: 1536).', default=1536)
 
     p.add_argument('--model', '-m', type=str, default='lstmcnncrf')
 
