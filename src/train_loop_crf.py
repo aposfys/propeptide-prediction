@@ -29,16 +29,16 @@ global_step = 0
 def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1,2], valid_partitions: List[int] = [3], test_partitions: List[int] = [4]) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
     if args.embedding == 'precomputed':
-        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions, label_type=args.label_type)
-        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions, label_type=args.label_type)
-        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions, label_type=args.label_type)
+        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions)
+        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions)
+        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions)
 
     print(f'Loaded data. {len(train_set)} train sequences (p.{train_partitions}), {len(valid_set)} validation sequences (p.{valid_partitions}), {len(test_set)} test sequences (p.{test_partitions}).')
 
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=False, collate_fn=train_set.collate_fn, num_workers=2)
-    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
-    test_loader = DataLoader(test_set, batch_size=args.batch_size, collate_fn=valid_set.collate_fn, num_workers=1)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=train_set.collate_fn, num_workers=0)
+    valid_loader = DataLoader(valid_set, batch_size=args.batch_size, shuffle=False, collate_fn=valid_set.collate_fn, num_workers=0)
+    test_loader = DataLoader(test_set, batch_size=args.batch_size, shuffle=False, collate_fn=test_set.collate_fn, num_workers=0)
 
     return train_loader, valid_loader, test_loader
 
@@ -47,35 +47,33 @@ def get_model(args: argparse.Namespace):
 
     if args.model == 'lstmcnncrf':
         model = LSTMCNNCRF(
-            input_size = args.embedding_dim,
-            num_labels=3 if 'with_propeptides' in args.label_type else 2,
+            input_size=args.embedding_dim,
+            num_labels=2,
             dropout_input=args.dropout,
-            num_states= 101 if 'with_propeptides' in args.label_type else 51,
+            num_states=51,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
-            filter_size=args.kernel_size, 
+            filter_size=args.kernel_size,
             dropout_conv1=args.conv_dropout,
         )
     elif args.model == 'lstmcnncrf_simple':
         model = SimpleLSTMCNNCRF(
-            input_size = args.embedding_dim,
-            num_labels=3 if args.label_type == 'simple_with_propeptides' else 2,
+            input_size=args.embedding_dim,
+            num_labels=2,
             dropout_input=args.dropout,
-            num_states= 3 if args.label_type == 'simple_with_propeptides' else 2,
+            num_states=2,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
-            filter_size=args.kernel_size, 
+            filter_size=args.kernel_size,
             dropout_conv1=args.conv_dropout,
         )
-
-    # NOTE just use already existing CLI args with names that don't really match. Works.
     elif args.model == 'selfattentioncrf':
         model = SelfAttentionCRF(
-            input_size = args.embedding_dim,
-            hidden_size= args.hidden_size,
-            num_labels=3 if 'with_propeptides' in args.label_type else 2,
+            input_size=args.embedding_dim,
+            hidden_size=args.hidden_size,
+            num_labels=2,
             dropout_input=args.dropout,
-            num_states= 121 if 'with_propeptides' in args.label_type else 61,
+            num_states=51,
             n_heads=args.num_filters,
             attn_dropout=args.conv_dropout,
         )
@@ -141,7 +139,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
 
         print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}')
 
-        stopping_metric = (valid_metrics['f1 peptides'] + valid_metrics['f1 propeptides'])/2#(valid_metrics['F1 +- 3 peptide'] + valid_metrics['F1 +- 3 propeptide'])/2
+        stopping_metric = valid_metrics['f1 propeptides']
         if stopping_metric > previous_best:
             previous_best = stopping_metric
             best_val_metrics = valid_metrics
@@ -249,8 +247,6 @@ def parse_arguments():
     p.add_argument('--kernel_size', type=int, default=3)
     p.add_argument('--num_filters', type=int, default=32)
     p.add_argument('--hidden_size', type=int, default=64)
-
-    p.add_argument('--label_type', type=str, default='multistate_with_propeptides')
 
     args = p.parse_args()
 
