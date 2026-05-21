@@ -436,30 +436,20 @@ class PrecomputedCSVForCRFDataset(Dataset):
 
 
 
+_EMBEDDING_CACHE: dict = {}
+
+
 class PrecomputedCSVForOverlapCRFDataset(Dataset):
-    '''Use together with modified extract.py script. Retrieves seqs via md5 hash.'''
+    '''Propeptide-only dataset. Labels use states 1-50 for propeptide, 0 for background.
+    Embeddings are cached in memory after the first load so repeated epoch access is fast.'''
     def __init__(
-        self, 
-        embeddings_dir: str, 
-        data_file: str, 
-        partitioning_file: str, 
-        partitions: List[int]=[0], 
-        label_type = None, # for compatibility
-        ):
-        """
-        Dataset to hold fasta files with precomputed embeddings.
-        Can also parse graph-part partition assignments.
-        When dealing with overlapping peptides, randomly samples one and uses it for labeling in a iteration.
-        This is much slower than just loading a precomputed label, so use enough workers.
-
-
-        Args:
-            embeddings_dir (str): Directory containing precomputed embeddings produced by `extract.py`
-            csv_file (str): csv with sequences, labels and other metadata.
-            partitioning_file (str): Graph-Part output for `fasta_file`. Defaults to None.
-            partitions (List[int], optional): Partitions to retain. Defaults to [0].
-        """
-
+        self,
+        embeddings_dir: str,
+        data_file: str,
+        partitioning_file: str,
+        partitions: List[int] = [0],
+        label_type=None,  # kept for API compatibility, unused
+    ):
         super().__init__()
         self.embeddings_dir = embeddings_dir
 
@@ -467,96 +457,49 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
         data = data.join(partitioning)
         data = data.loc[data['cluster'].isin(partitions)]
-        data = data.fillna('') # empty coordinates would become nan.
-        self.data = data
-
-        self.names = data.index.tolist() # don't want to bother with pandas indexing here.
-
-        
-        # NOTE self.peptides is 1-based indexing straight from UniProt.
+        data = data.fillna('')
         self.data = data
         self.names = data.index.tolist()
 
-        coordinate_strings = data['coordinates'].tolist()
         propeptide_coordinate_strings = data['propeptide_coordinates'].tolist()
-        coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in coordinate_strings]
-        propeptide_coordinates = [parse_coordinate_string(x, merge_overlaps=False) for x in propeptide_coordinate_strings]
+        propeptide_coordinates = [parse_coordinate_string(x, merge_overlaps=True)
+                                  for x in propeptide_coordinate_strings]
 
-        # NOTE we feed .data to our metrics fn. it expects some more columns.
-        self.data['true_peptides'] = coordinates
         self.data['true_propeptides'] = propeptide_coordinates
-
-        self.peptides_only = coordinates
         self.propeptides = propeptide_coordinates
-        self.peptides = [(x,y) for x,y, in zip(coordinates, propeptide_coordinates)] # data loading works exactly the same. only metrics computation needs to unpack this.
-
 
         self.sequences = data['sequence'].tolist()
         self.organism = data['organism'].tolist()
         self.hashes = make_hashes(self.sequences)
-        
 
     def __len__(self) -> int:
         return len(self.names)
 
-    @staticmethod 
-    def _sample_from_overlapping_peptides(peptide_coordinates, propeptide_coordinates):
-        '''Finds overlapping groups of peptides. Samples one peptide from each group.'''
-        peptides_to_keep = []
-        propeptides_to_keep = []
-
-        # https://stackoverflow.com/questions/48243507/group-rows-by-overlapping-ranges
-        all_peptides = peptide_coordinates + propeptide_coordinates
-        types = ['Peptide'] * len(peptide_coordinates) + ['Propeptide'] * len(propeptide_coordinates)
-        starts, ends = zip(*all_peptides)
-
-        df = pd.DataFrame([starts, ends, types], index = ['start', 'end', 'type']).T
-        df = df.sort_values(['start', 'end'], ascending=[True, False])
-
-        df['group'] = (df['end'].cummax().shift() < df['start']).cumsum() # was <= originally. but indexing is inclusive in uniprot.
-        df = df.sort_index()
-
-        for group, group_df in df.groupby('group'):
-            peptide = group_df.sample(1).iloc[0] # returns df, but we need the single row
-            if peptide['type'] == 'Peptide':
-                peptides_to_keep.append((peptide['start'], peptide['end']))
-            else:
-                propeptides_to_keep.append((peptide['start'], peptide['end']))
-
-        return peptides_to_keep, propeptides_to_keep
-
-
-
-    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-
+    def __getitem__(self, index: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, list]:
         seq_hash = self.hashes[index]
         seq_len = len(self.sequences[index])
-        try:
-            embeddings = torch.load(os.path.join(self.embeddings_dir, f'{seq_hash}.pt')).to(torch.float32) #esm2 comes as half
-        except FileNotFoundError:
-            raise FileNotFoundError(f'Could not find sequence hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.')
+        pt_path = os.path.join(self.embeddings_dir, f'{seq_hash}.pt')
 
-        peptides, propeptides = self.peptides[index]
-        peptides, propeptides = self._sample_from_overlapping_peptides(peptides, propeptides)
+        if pt_path not in _EMBEDDING_CACHE:
+            try:
+                _EMBEDDING_CACHE[pt_path] = torch.load(pt_path).to(torch.float32)
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    f'Could not find hash {seq_hash} for {self.names[index]} in {self.embeddings_dir}.'
+                )
+        embeddings = _EMBEDDING_CACHE[pt_path]
 
-        label = peptide_list_to_label_sequence(peptides, seq_len, max_len = 50) 
-        propeptide_label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=51, max_len=50) 
-        label = label + propeptide_label # numpy arrays with no overlap at nonzero positions so we can just add the two.
-
-
+        propeptides = self.propeptides[index]
+        label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1, max_len=50)
         label = torch.from_numpy(label)
         mask = torch.ones(embeddings.shape[0])
-        peptides = self.peptides[index]
 
-        return embeddings, mask, label, self.peptides[index] # this is for the metrics.
+        return embeddings, mask, label, propeptides
 
     @staticmethod
-    def collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[np.ndarray]]:
-
-        embeddings, masks, labels, peptides = zip(*batch)
+    def collate_fn(batch):
+        embeddings, masks, labels, propeptides = zip(*batch)
         embeddings = torch.nn.utils.rnn.pad_sequence(embeddings, batch_first=True)
         masks = torch.nn.utils.rnn.pad_sequence(masks, batch_first=True)
-
         labels = torch.nn.utils.rnn.pad_sequence(labels, batch_first=True)
-
-        return embeddings.permute(0,2,1), masks, labels, peptides
+        return embeddings.permute(0, 2, 1), masks, labels, propeptides
