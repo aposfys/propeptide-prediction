@@ -73,14 +73,16 @@ python -m src.train_loop_crf \
 | argument | default | description |
 |---|---|---|
 | `--embedding_dim` | 1024 | ProstT5 output dimension |
-| `--epochs` | 30 | max training epochs |
+| `--epochs` | 30 | max training epochs (subject to early stopping) |
 | `--batch_size` | 100 | sequences per batch |
-| `--model` | `lstmcnncrf` | model architecture |
+| `--patience` | 10 | early stopping: epochs without propeptide F1 improvement |
+| `--model` | `lstmcnncrf` | model architecture (`lstmcnncrf`, `lstmcnncrf_simple`, `selfattentioncrf`) |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
-
-Note: `--lr`, `--num_filters`, `--hidden_size`, `--dropout`, `--conv_dropout`,
-`--kernel_size` were optimised in a nested CV hyperparameter search and are not
-at their optimal values by default.
+| `--lr` | 1e-4 | peak learning rate (warmed up linearly, then cosine-decayed) |
+| `--dropout` | 0.1 | input and conv dropout |
+| `--num_filters` | 32 | number of CNN filters |
+| `--hidden_size` | 64 | biLSTM hidden size |
+| `--kernel_size` | 3 | CNN kernel size |
 
 Training writes to `--out_dir`:
 - `model.pt` — best checkpoint (by validation propeptide F1)
