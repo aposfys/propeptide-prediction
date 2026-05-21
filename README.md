@@ -1,21 +1,96 @@
-# DeepPeptide
-Predicting cleaved peptides in protein sequences.
+# DeepPeptide (ESM3)
+Predicting cleaved peptides in protein sequences using ESM3.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
 
+This branch replaces the ESM-2 embedder with **ESM3** (`esm3_sm_open_v1`, 1536-dim)
+while keeping the full multi-label CRF (propeptide + mature peptide coordinates).
+CPU compatible: the distributed backend falls back to `gloo` when no GPU is available.
 
-### Training the model
-1. Precompute embeddings using `src/utils/make_embeddings.py`  
-2. Train the model  
-```
-python3 run.py --embeddings_dir PATH/TO/EMBEDDINGS -df data/labeled_sequences.csv -pf data/graphpart_assignments.csv
-```
-Note that parameters `--lr`, `--batch_size`, `--dropout`, `--conv_dropout`, `--kernel_size`, `--num_filters`, `--hidden_size` were optimized in a nested CV hyperparameter search and not used at their defaults.
+Embedder: `esm3_sm_open_v1` (ESM3, 1536-dim per residue).
 
-### Evaluation
+---
+
+## Training
+
+### Step 1 — Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+### Step 2 — Prepare data
+
+Two CSV files are required (already provided under `data/` for the UniProt 2022 benchmark):
+
+**`labeled_sequences.csv`** (indexed by `protein_id`):
+
+| column | description |
+|---|---|
+| `sequence` | full precursor amino acid sequence |
+| `coordinates` | peptide coordinates, e.g. `(12-45),(78-102)` |
+| `propeptide_coordinates` | propeptide coordinates in same format |
+| `organism` | organism name or taxon |
+
+**`graphpart_assignments.csv`** (indexed by `AC`):
+
+| column | description |
+|---|---|
+| `cluster` | partition index 0–4 (from [Graph-Part](https://github.com/graph-part/graph-part)) |
+
+---
+
+### Step 3 — Precompute embeddings
+
+```bash
+python -m src.utils.make_embeddings \
+    data/protein_sequences.fasta \
+    PATH/TO/EMBEDDINGS/
+```
+
+Embeddings are saved as `.pt` files named by MD5 hash of the sequence. The script
+skips sequences already processed, so it is safe to interrupt and resume.
+
+---
+
+### Step 4 — Train
+
+```bash
+python run.py \
+    --embeddings_dir PATH/TO/EMBEDDINGS \
+    -df data/labeled_sequences.csv \
+    -pf data/graphpart_assignments.csv
+```
+
+**Key arguments:**
+
+| argument | default | description |
+|---|---|---|
+| `--embedding_dim` | 1536 | ESM3 output dimension |
+| `--epochs` | 30 | max training epochs |
+| `--batch_size` | 100 | sequences per batch |
+| `--label_type` | `multistate_with_propeptides` | CRF label scheme |
+| `--model` | `lstmcnncrf` | model architecture |
+| `--out_dir` | `train_run` | where checkpoints and logs are saved |
+
+Note: `--lr`, `--num_filters`, `--hidden_size`, `--dropout`, `--conv_dropout`,
+`--kernel_size` were optimised in a nested CV hyperparameter search and are not
+at their optimal values by default.
+
+---
+
+### Step 5 — Evaluate
+
+We used 5-fold nested CV to produce 20 model checkpoints (5 outer folds × 4 inner folds).
+The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which
+computes precision / recall / F1 from saved predictions.
+
 - PeptideLocator was evaluated as a licensed executable and cannot be provided in this repo.
-- We used 5-fold nested CV to select 20 model checkpoints trained using `src/train_loop_crf.py`. The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which computes the performance metrics from the checkpoints' saved predictions.
 
-### Predicting
+---
+
+## Predicting
 
 [See the predictor README](predictor/README.md)
