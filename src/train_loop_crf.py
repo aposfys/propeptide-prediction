@@ -1,9 +1,12 @@
 '''
-CRF train loop.
-- no marginals
+CRF train loop — propeptide-only, ESM-2 embeddings.
+- LR warmup + cosine decay
+- patience-based early stopping on propeptide F1
+- no marginals during training
 - no train metrics
 '''
 import json
+import math
 import pickle
 from typing import Dict, List, Tuple
 import os
@@ -14,6 +17,7 @@ from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
 #from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
 from .utils.manuscript_metrics import compute_all_metrics
 from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
 import torch
 import numpy as np
 import argparse
@@ -115,42 +119,54 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
 
 
     model.feature_extractor.biLSTM.flatten_parameters()
-    # model = get_model(args)
-    # model.to(device)
-    optimizer = Adam(model.parameters(), lr = args.lr)
+    optimizer = Adam(model.parameters(), lr=args.lr)
     writer = SummaryWriter(args.out_dir)
 
-    previous_best = -100000000000
+    base_lr = args.lr
+    warmup_epochs = max(3, int(0.05 * args.epochs))
+
+    def _lr_lambda(epoch: int) -> float:
+        if epoch < warmup_epochs:
+            return float(epoch + 1) / float(warmup_epochs)
+        progress = float(epoch - warmup_epochs) / float(max(1, args.epochs - warmup_epochs - 1))
+        cosine_val = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return max(1e-6 / base_lr, cosine_val)
+
+    scheduler = LambdaLR(optimizer, lr_lambda=_lr_lambda)
+    previous_best = -1.0
+    patience_counter = 0
 
     for epoch in range(args.epochs):
 
         train_loss, train_probs, train_preds, train_peptides, train_labels = run_dataloader(train_loader, model, optimizer, writer, do_train=True)
-        #train_metrics = compute_crf_metrics(train_probs, train_preds, train_peptides, train_labels)
-        #train_metrics = metrics_fn(train_peptides, train_preds)
-        #add_dict_to_writer(train_metrics, writer, global_step, prefix='Train')
 
         valid_loss, valid_probs, valid_preds, valid_peptides, valid_labels = run_dataloader(valid_loader, model, optimizer, writer, do_train=False)
-        #valid_metrics_old = compute_crf_metrics(valid_probs, valid_preds, valid_peptides, valid_labels)#, organism=valid_loader.dataset.data['organism'])
-        #valid_metrics = metrics_fn(valid_peptides, valid_preds, valid_loader.dataset.data['organism'])
-        valid_metrics = compute_all_metrics(valid_probs, valid_preds, valid_labels, valid_loader.dataset.names, valid_loader.dataset.data, windows = [3])[0]
+        valid_metrics = compute_all_metrics(valid_probs, valid_preds, valid_labels, valid_loader.dataset.names, valid_loader.dataset.data, windows=[3])[0]
         add_dict_to_writer(valid_metrics, writer, global_step, prefix='Valid')
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
-
-        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}')
-
         stopping_metric = valid_metrics['f1 propeptides']
-        if stopping_metric > previous_best:
+        scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+
+        improved = stopping_metric > previous_best
+        if improved:
             previous_best = stopping_metric
             best_val_metrics = valid_metrics
+            patience_counter = 0
             pickle.dump((valid_probs, valid_preds, valid_labels, valid_loader.dataset.names), open(os.path.join(args.out_dir, 'valid_outputs.pickle'), 'wb'))
-            valid_metrics['epoch'] = epoch # keep track of best early stopping.
+            valid_metrics['epoch'] = epoch
             json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
             torch.save(model.state_dict(), os.path.join(args.out_dir, 'model.pt'))
+        else:
+            patience_counter += 1
 
-            # valid_metrics = metrics_fn(valid_peptides, valid_preds, valid_loader.dataset.data['organism'])
-            # valid_metrics['epoch'] = epoch # keep track of best early stopping.
-            # json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics_old.json'), 'w'), indent=2)
+        marker = '*' if improved else ' '
+        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={stopping_metric:.4f}  best={previous_best:.4f}  patience={patience_counter}/{args.patience}  lr={current_lr:.2e}', flush=True)
+
+        if patience_counter >= args.patience:
+            print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
+            break
     
     model.load_state_dict(torch.load(os.path.join(args.out_dir, 'model.pt')))
     test_loss, test_probs, test_preds, test_peptides, test_labels = run_dataloader(test_loader, model, optimizer, writer, do_train=False)
@@ -201,8 +217,8 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
 
         if do_train:
             pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
-            torch.nn.utils.clip_grad_norm_(model.parameters(),0.25 )
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
             optimizer.step()
             writer.add_scalar('Train/loss', loss.item(), global_step=global_step)
             global_step += 1
@@ -247,6 +263,7 @@ def parse_arguments():
     p.add_argument('--kernel_size', type=int, default=3)
     p.add_argument('--num_filters', type=int, default=32)
     p.add_argument('--hidden_size', type=int, default=64)
+    p.add_argument('--patience', type=int, default=10, help='early stopping patience (epochs without propeptide F1 improvement)')
 
     args = p.parse_args()
 
