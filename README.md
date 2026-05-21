@@ -90,9 +90,18 @@ Training writes to `--out_dir`:
 
 ### Step 5 — Evaluate
 
-We used 5-fold nested CV to produce 20 model checkpoints (5 outer folds × 4 inner folds).
-The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which
-computes precision / recall / F1 from saved predictions.
+After training completes, test-set metrics are written automatically to `--out_dir/test_metrics.json`.
+These include precision, recall, and F1 for both peptide and propeptide predictions, computed with a
+±3-residue boundary tolerance.
+
+To reproduce the metrics from the original publication, which used 5-fold nested CV
+(5 outer folds × 4 inner folds, 20 checkpoints total), run:
+
+```bash
+python evaluation/measure_performance.py
+```
+
+The selected checkpoints are hardcoded in that script.
 
 - PeptideLocator was evaluated as a licensed executable and cannot be provided in this repo.
 
