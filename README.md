@@ -1,21 +1,103 @@
-# DeepPeptide
-Predicting cleaved peptides in protein sequences.
+# DeepPeptide (ESM-2)
+Predicting cleaved peptides and propeptides in protein sequences using ESM-2.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
 
+---
 
-### Training the model
-1. Precompute embeddings using `src/utils/make_embeddings.py`  
-2. Train the model  
-```
-python3 run.py --embeddings_dir PATH/TO/EMBEDDINGS -df data/labeled_sequences.csv -pf data/graphpart_assignments.csv
-```
-Note that parameters `--lr`, `--batch_size`, `--dropout`, `--conv_dropout`, `--kernel_size`, `--num_filters`, `--hidden_size` were optimized in a nested CV hyperparameter search and not used at their defaults.
+## Training
 
-### Evaluation
+### Step 1 — Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+### Step 2 — Prepare data
+
+Two CSV files are required (already provided under `data/` for the UniProt 2022 benchmark):
+
+**`labeled_sequences.csv`** (indexed by `protein_id`):
+
+| column | description |
+|---|---|
+| `sequence` | full precursor amino acid sequence |
+| `coordinates` | peptide coordinates, e.g. `(12-45),(78-102)` |
+| `propeptide_coordinates` | propeptide coordinates in same format |
+| `organism` | organism name or taxon |
+
+**`graphpart_assignments.csv`** (indexed by `AC`):
+
+| column | description |
+|---|---|
+| `cluster` | partition index 0–4 (from [Graph-Part](https://github.com/graph-part/graph-part)) |
+
+---
+
+### Step 3 — Precompute embeddings
+
+Embeddings are computed **once** and cached as `.pt` files (one per sequence, named by
+MD5 hash of the sequence). The training script only reads these files.
+
+```bash
+python -m src.utils.make_embeddings \
+    data/protein_sequences.fasta \
+    PATH/TO/EMBEDDINGS/
+```
+
+The script skips sequences whose `.pt` file already exists, so it is safe to
+interrupt and resume.
+
+---
+
+### Step 4 — Train
+
+```bash
+python -m src.train_loop_crf \
+    --embeddings_dir PATH/TO/EMBEDDINGS \
+    --data_file data/labeled_sequences.csv \
+    --partitioning_file data/graphpart_assignments.csv \
+    --out_dir PATH/TO/OUTPUT
+```
+
+**Key arguments:**
+
+| argument | default | description |
+|---|---|---|
+| `--embedding_dim` | 1280 | ESM-2 output dimension |
+| `--epochs` | 30 | max training epochs (subject to early stopping) |
+| `--batch_size` | 100 | sequences per batch |
+| `--patience` | 10 | early stopping: epochs without mean peptide+propeptide F1 improvement |
+| `--label_type` | `multistate_with_propeptides` | CRF label scheme |
+| `--model` | `lstmcnncrf` | model architecture |
+| `--out_dir` | `train_run` | where checkpoints and logs are saved |
+| `--lr` | 1e-4 | peak learning rate (warmed up linearly, then cosine-decayed) |
+| `--dropout` | 0.1 | input dropout |
+| `--conv_dropout` | 0.1 | conv layer dropout |
+| `--num_filters` | 32 | number of CNN filters |
+| `--hidden_size` | 64 | biLSTM hidden size |
+| `--kernel_size` | 3 | CNN kernel size |
+
+Training writes to `--out_dir`:
+- `model.pt` — best checkpoint (by validation F1)
+- `valid_metrics.json` — validation metrics at best epoch
+- `test_metrics.json` — test metrics
+- TensorBoard logs (run `tensorboard --logdir PATH/TO/OUTPUT`)
+
+---
+
+### Step 5 — Evaluate
+
+We used 5-fold nested CV to produce 20 model checkpoints (5 outer folds × 4 inner folds).
+The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which
+computes precision / recall / F1 from saved predictions.
+
 - PeptideLocator was evaluated as a licensed executable and cannot be provided in this repo.
-- We used 5-fold nested CV to select 20 model checkpoints trained using `src/train_loop_crf.py`. The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which computes the performance metrics from the checkpoints' saved predictions.
 
-### Predicting
+---
+
+## Predicting
 
 [See the predictor README](predictor/README.md)
