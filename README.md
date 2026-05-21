@@ -1,7 +1,7 @@
 # DeepPeptide (ProstT5)
 Predicting cleaved peptides in protein sequences using ProstT5.
 
-[![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
+https://www.biorxiv.org/content/10.1101/2023.07.23.550085v1
 
 ---
 
