@@ -131,50 +131,23 @@ class CRFBaseModel(nn.Module):
             return probs, viterbi_paths, path_probs
 
     @staticmethod
-    def _esm_embed(sequence:str, device: torch.device, repr_layers: int=33) -> torch.Tensor:
+    def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
+        '''Embed a single sequence with ProstT5. Returns (L, 1024) on CPU.'''
+        from transformers import T5EncoderModel, T5Tokenizer
+        tokenizer = T5Tokenizer.from_pretrained('Rostlab/ProstT5', do_lower_case=False)
+        model = T5EncoderModel.from_pretrained('Rostlab/ProstT5').eval().to(device)
 
+        # ProstT5 requires <AA2fold> prefix and spaces between residues
+        seq_spaced = ' '.join(list(sequence))
+        ids = tokenizer(['<AA2fold> ' + seq_spaced], return_tensors='pt', add_special_tokens=True)
+        input_ids = ids['input_ids'].to(device)
+        attention_mask = ids['attention_mask'].to(device)
 
-        from esm import pretrained
-        esm_model, esm_alphabet = pretrained.load_model_and_alphabet('esm1b_t33_650M_UR50S')
-        batch_converter = esm_alphabet.get_batch_converter()
-        esm_model.to(device)
+        with torch.no_grad():
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-
-        data = [
-            ("protein1", sequence),
-        ]
-        labels, strs, toks = batch_converter(data)
-
-        repr_layers_list = [
-            (i + esm_model.num_layers + 1) % (esm_model.num_layers + 1) for i in range(repr_layers)
-        ]
-
-        out = None
-
-        toks = toks.to(device)
-
-        minibatch_max_length = toks.size(1)
-
-        tokens_list = []
-        end = 0
-        while end <= minibatch_max_length:
-            start = end
-            end = start + 1022
-            if end <= minibatch_max_length:
-                # we are not on the last one, so make this shorter
-                end = end - 300
-            tokens = esm_model(toks[:, start:end], repr_layers=repr_layers_list, return_contacts=False)["representations"][repr_layers - 1]
-            tokens_list.append(tokens)
-
-        out = torch.cat(tokens_list, dim=1).cpu()
-
-        # set nan to zeros
-        out[out!=out] = 0.0
-
-        res = out.transpose(0,1)[1:-1] 
-        seq_embedding = res[:,0]
-
-        return seq_embedding
+        # Strip BOS/EOS tokens → (L, 1024)
+        return out.last_hidden_state[0, 1:-1].cpu()
 
     def predict_from_sequence(self, sequence: str, top_k: int = 5):
         self.eval()
@@ -260,6 +233,31 @@ class LSTMCNNCRF(CRFBaseModel):
         allowed_transitions, allowed_start, allowed_end = self.get_crf_constraints(self.max_len, self.min_len)
         self.crf = CRF(num_states, batch_first=True, allowed_transitions=allowed_transitions, allowed_start=allowed_start, allowed_end=allowed_end)
 
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        '''Xavier/Kaiming initialization for all trainable layers.
+
+        Downstream heads on top of frozen LMs benefit from controlled init:
+        the LM already provides rich features, so the head should start with
+        small, balanced weights rather than PyTorch's layer-type defaults.
+        '''
+        fe = self.feature_extractor
+        # Conv1: compresses ProstT5 1024-dim → n_filters; kaiming for ReLU
+        nn.init.kaiming_uniform_(fe.conv1.weight, nonlinearity='relu')
+        nn.init.zeros_(fe.conv1.bias)
+        # Conv2: hidden*2 → n_filters*2 after biLSTM; kaiming for ReLU
+        nn.init.kaiming_uniform_(fe.conv2.weight, nonlinearity='relu')
+        nn.init.zeros_(fe.conv2.bias)
+        # biLSTM: Xavier for all weight matrices, zeros for biases
+        for name, param in fe.biLSTM.named_parameters():
+            if 'weight' in name:
+                nn.init.xavier_uniform_(param)
+            elif 'bias' in name:
+                nn.init.zeros_(param)
+        # Emission head: Xavier (no nonlinearity after Linear)
+        nn.init.xavier_uniform_(self.features_to_emissions.weight)
+        nn.init.zeros_(self.features_to_emissions.bias)
 
 
 class SimpleLSTMCNNCRF(CRFBaseModel):
@@ -287,11 +285,12 @@ class SimpleLSTMCNNCRF(CRFBaseModel):
 
 
     # redefine forward because no emission repeating.
-    def forward(self, embeddings, mask, targets = None, skip_marginals: bool = False):
-        features = self.feature_extractor(embeddings, mask) # (batch_size, seq_len, feature_dim)
-        emissions = self.features_to_emissions(features) # (batch_size, seq_len, num_labels)
-        
-        viterbi_paths, probs = self.crf.decode(emissions=emissions, mask = mask.byte())
+    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False, use_focal: bool = False):
+        # use_focal accepted for API compatibility with CRFBaseModel; not applied here (simple 2-state CRF)
+        features = self.feature_extractor(embeddings, mask)
+        emissions = self.features_to_emissions(features)
+
+        viterbi_paths, probs = self.crf.decode(emissions=emissions, mask=mask.byte())
 
         #pad the viterbi paths
         # max_pad_len = max([len(x) for x in viterbi_paths])
