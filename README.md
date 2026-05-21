@@ -1,7 +1,7 @@
 # DeepPeptide (ESM3)
 Predicting cleaved peptides in protein sequences using ESM3.
 
-[![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
+https://www.science.org/doi/10.1126/science.ade2574
 
 This branch replaces the ESM-2 embedder with **ESM3** (`esm3_sm_open_v1`, 1536-dim)
 while keeping the full multi-label CRF (propeptide + mature peptide coordinates).
