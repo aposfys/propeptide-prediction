@@ -10,12 +10,7 @@ tensorboard==2.8.0
 torch==1.11.0
 tqdm==4.64.0
 
-# Embedding — choose ONE of the two options below:
-
-# Option A: ESM-2 (1280-dim) — install this to use make_embeddings.py
-# fair-esm==1.0.2
-
-# Option B: ProstT5 (1024-dim) — install these to use make_embeddings_prost5.py
-# transformers>=4.30.0
-# sentencepiece
-# protobuf
+# ProstT5 embedder
+transformers>=4.30.0
+sentencepiece
+protobuf
