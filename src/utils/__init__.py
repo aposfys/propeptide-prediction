@@ -1,2 +1,2 @@
 from .dataset import PrecomputedCSVDataset, BLOSUMCSVDataset, PrecomputedCSVForCRFDataset, PrecomputedCSVForOverlapCRFDataset
-from .manuscript_metrics import compute_all_metrics
+from .metrics import compute_metrics, add_dict_to_writer, compute_crf_metrics
