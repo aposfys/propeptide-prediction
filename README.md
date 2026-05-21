@@ -3,19 +3,116 @@ Predicting cleaved peptides in protein sequences.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
 
+---
 
-### Training the model
-1. Precompute embeddings using `src/utils/make_embeddings.py`  
-2. Train the model  
-```
-python3 run.py --embeddings_dir PATH/TO/EMBEDDINGS -df data/labeled_sequences.csv -pf data/graphpart_assignments.csv
-```
-Note that parameters `--lr`, `--batch_size`, `--dropout`, `--conv_dropout`, `--kernel_size`, `--num_filters`, `--hidden_size` were optimized in a nested CV hyperparameter search and not used at their defaults.
+## Training
 
-### Evaluation
+### Step 1 — Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Then install an embedding library — **choose one**, not both:
+
+| Embedder | Dim | Command |
+|---|---|---|
+| ProstT5 (recommended) | 1024 | `pip install transformers sentencepiece protobuf` |
+| ESM-2 | 1280 | `pip install fair-esm==1.0.2` |
+
+---
+
+### Step 2 — Prepare data
+
+Two CSV files are required (already provided under `data/` for the UniProt 2022 benchmark):
+
+**`labeled_sequences.csv`** (indexed by `protein_id`):
+
+| column | description |
+|---|---|
+| `sequence` | full precursor amino acid sequence |
+| `coordinates` | peptide coordinates, e.g. `(12-45),(78-102)` |
+| `propeptide_coordinates` | propeptide coordinates in same format |
+| `organism` | organism name or taxon |
+
+**`graphpart_assignments.csv`** (indexed by `AC`):
+
+| column | description |
+|---|---|
+| `cluster` | partition index 0–4 (from [Graph-Part](https://github.com/graph-part/graph-part)) |
+
+---
+
+### Step 3 — Precompute embeddings
+
+Embeddings are computed **once** and cached as `.pt` files (one per sequence, named by
+MD5 hash of the sequence string). The training script only reads these files — it never
+calls the embedding model directly. Run **one** of the two scripts below.
+
+**ProstT5** (1024-dim, recommended):
+```bash
+python -m src.utils.make_embeddings_prost5 \
+    data/protein_sequences.fasta \
+    PATH/TO/EMBEDDINGS/ \
+    --half          # fp16 halves memory; accuracy impact is negligible
+```
+
+**ESM-2** (1280-dim, original):
+```bash
+python -m src.utils.make_embeddings \
+    data/protein_sequences.fasta \
+    PATH/TO/EMBEDDINGS/
+```
+
+Both scripts skip sequences whose `.pt` file already exists, so it is safe to
+interrupt and resume.
+
+---
+
+### Step 4 — Train
+
+```bash
+python -m src.train_loop_crf \
+    --embeddings_dir PATH/TO/EMBEDDINGS \
+    --data_file data/labeled_sequences.csv \
+    --partitioning_file data/graphpart_assignments.csv \
+    --out_dir PATH/TO/OUTPUT \
+    --embedding_dim 1024    # use 1280 if you used ESM-2 in Step 3
+```
+
+**Key arguments:**
+
+| argument | default | description |
+|---|---|---|
+| `--embedding_dim` | 1280 | must match the embedder: ProstT5=1024, ESM-2=1280 |
+| `--epochs` | 30 | max training epochs |
+| `--batch_size` | 100 | sequences per batch |
+| `--label_type` | `multistate_with_propeptides` | CRF label scheme |
+| `--model` | `lstmcnncrf` | model architecture |
+| `--out_dir` | `train_run` | where checkpoints and logs are saved |
+
+Note: `--lr`, `--num_filters`, `--hidden_size`, `--dropout`, `--conv_dropout`,
+`--kernel_size` were optimised in a nested CV hyperparameter search and are not
+at their optimal values by default.
+
+Training writes to `--out_dir`:
+- `model.pt` — best checkpoint (by validation F1)
+- `valid_metrics.json` — validation metrics at best epoch
+- `test_metrics.json` — test metrics
+- TensorBoard logs (run `tensorboard --logdir PATH/TO/OUTPUT`)
+
+---
+
+### Step 5 — Evaluate
+
+We used 5-fold nested CV to produce 20 model checkpoints (5 outer folds × 4 inner folds).
+The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which
+computes precision / recall / F1 from saved predictions.
+
 - PeptideLocator was evaluated as a licensed executable and cannot be provided in this repo.
-- We used 5-fold nested CV to select 20 model checkpoints trained using `src/train_loop_crf.py`. The selected checkpoints are hardcoded in `evaluation/measure_performance.py`, which computes the performance metrics from the checkpoints' saved predictions.
 
-### Predicting
+---
+
+## Predicting
 
 [See the predictor README](predictor/README.md)

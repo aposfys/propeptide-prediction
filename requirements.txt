@@ -1,6 +1,5 @@
-fair-esm==1.0.2
+# Core training dependencies
 fairscale==0.4.10
-ipdb==0.13.9
 matplotlib==3.5.1
 optuna==2.10.0
 pandas==1.4.2
@@ -9,11 +8,14 @@ scipy==1.8.0
 seaborn==0.11.2
 tensorboard==2.8.0
 torch==1.11.0
-torch-tb-profiler==0.4.0
-torchaudio==0.11.0
-torchvision==0.12.0
 tqdm==4.64.0
-# ProstT5 dependencies (optional — only needed for make_embeddings_prost5.py)
-transformers>=4.30.0
-sentencepiece
-protobuf
+
+# Embedding — choose ONE of the two options below:
+
+# Option A: ESM-2 (1280-dim) — install this to use make_embeddings.py
+# fair-esm==1.0.2
+
+# Option B: ProstT5 (1024-dim) — install these to use make_embeddings_prost5.py
+# transformers>=4.30.0
+# sentencepiece
+# protobuf
