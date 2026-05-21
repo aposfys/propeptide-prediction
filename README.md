@@ -1,7 +1,7 @@
 # DeepPeptide (ESM-2, propeptide-only)
 Predicting propeptide cleavage sites in protein sequences using ESM-2.
 
-[![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
+https://www.science.org/doi/10.1126/science.ade2574
 
 This branch restricts training and evaluation to the **propeptide label only**
 (states 1–50; state 0 = background). Mature peptide coordinates are ignored.
