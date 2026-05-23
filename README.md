@@ -3,6 +3,8 @@ Predicting cleaved peptides and propeptides in protein sequences using ESM-2.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
 
+Embedder: `esm2_t33_650M_UR50D` (ESM-2, 1280-dim per residue). Runs on CUDA, MPS (Apple Silicon), or CPU.
+
 ---
 
 ## Training
@@ -40,6 +42,7 @@ Two CSV files are required (already provided under `data/` for the UniProt 2022 
 
 Embeddings are computed **once** and cached as `.pt` files (one per sequence, named by
 MD5 hash of the sequence). The training script only reads these files.
+
 
 ```bash
 python -m src.utils.make_embeddings \
