@@ -23,10 +23,12 @@ import numpy as np
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 
-from fairscale.nn.data_parallel import FullyShardedDataParallel as FSDP
-from fairscale.nn.wrap import enable_wrap, wrap
-
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
 global_step = 0
 
 
@@ -97,29 +99,8 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     train_loader, valid_loader, test_loader = get_dataloaders(args, train_partitions, valid_partitions, test_partitions)
 
 
-    if not is_initiated:
-        # when we run in nested CV, we need to do this outside of train() to avoid reinitialization errors.
-        url = "tcp://localhost:12355"
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        torch.distributed.init_process_group(backend=backend, init_method = url, world_size=1, rank=0)
-
-
-    # initialize the model with FSDP wrapper
-    fsdp_params = dict(
-        mixed_precision=False,
-        flatten_parameters=False,
-        state_dict_device=torch.device("cpu"),  # reduce GPU mem usage
-        move_params_to_cpu =True,  # enable cpu offloading
-        move_grads_to_cpu = True,
-    )
-
     model = get_model(args)
-
-    # NOTE FSDP does not support non-trainable weights yet. CRF has some.
-    # https://github.com/pytorch/pytorch/issues/75943
-    model = FSDP(model, **fsdp_params)
-
-
+    model = model.to(device)
     model.feature_extractor.biLSTM.flatten_parameters()
     optimizer = Adam(model.parameters(), lr=args.lr)
     writer = SummaryWriter(args.out_dir)
