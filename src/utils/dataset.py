@@ -466,6 +466,7 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
                                   for x in propeptide_coordinate_strings]
 
         self.data['true_propeptides'] = propeptide_coordinates
+        self.data['true_peptides'] = [[] for _ in range(len(data))]
         self.propeptides = propeptide_coordinates
 
         self.sequences = data['sequence'].tolist()
