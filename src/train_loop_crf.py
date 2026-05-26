@@ -29,7 +29,7 @@ from .utils.manuscript_metrics import compute_all_metrics
 
 import argparse
 
-device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+device = torch.device('cuda') if torch.cuda.is_available() else (torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu'))
 global_step = 0
 
 
@@ -161,7 +161,7 @@ def run_dataloader(
         embeddings, mask, label, propeptides = batch
         embeddings = embeddings.to(device)
         mask = mask.to(device)
-        label = label.to(device)
+        label = label.long().to(device)
 
         if do_train:
             model.zero_grad()
