@@ -196,7 +196,7 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
         embeddings, mask, label, peptides= batch
         embeddings = embeddings.to(device)
         mask = mask.to(device)
-        label = label.to(device)
+        label = label.long().to(device)
 
         if do_train:
             pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
