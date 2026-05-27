@@ -62,7 +62,7 @@ def _flush_batch(batch, model, tokenizer, device, embeddings_dir):
             n_saved += 1
             continue
         # Offset 1 skips the <AA2fold> prefix token; take exactly s_len residue positions
-        emb = output.last_hidden_state[b_idx, 1:s_len + 1].float().cpu()
+        emb = output.last_hidden_state[b_idx, 1:s_len + 1].float().cpu().clone()
         emb[emb != emb] = 0.0  # NaN → 0
         torch.save(emb, out_path)
         n_saved += 1
