@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # ── defaults ──────────────────────────────────────────────────────────────────
-REPO_URL="https://github.com/AfysFys/DeepPeptide_esm3.git"   # update if needed
+REPO_URL="https://github.com/aposfys/DeepPeptide-ESM3.git"
 REPO_DIR="${HOME}/DeepPeptide_esm3"
 EMB_DIR="${HOME}/embeddings"
 FASTA=""          # resolved from repo after clone/pull
