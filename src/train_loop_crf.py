@@ -347,6 +347,44 @@ def objective(
 
 
 # ---------------------------------------------------------------------------
+def train(args, train_partitions=[0,1,2], valid_partitions=[3], test_partitions=[4]):
+    '''Simple single train/val/test split — used by run_fold.py for 5-fold CV.'''
+    if getattr(args, 'num_cpu_threads', None):
+        torch.set_num_threads(args.num_cpu_threads)
+
+    device = (torch.device('cuda') if torch.cuda.is_available()
+              else torch.device('mps') if torch.backends.mps.is_available()
+              else torch.device('cpu'))
+
+    train_loader, valid_loader, test_loader = get_dataloaders(
+        args, train_partitions, valid_partitions, test_partitions)
+
+    model = get_model(args).to(device)
+    _flatten_lstm_if_present(model)
+    optimizer = Adam(model.parameters(), lr=args.lr,
+                     weight_decay=getattr(args, 'weight_decay', 0.0))
+    writer = SummaryWriter(args.out_dir)
+    checkpoint = os.path.join(args.out_dir, 'model.pt')
+
+    best_val_metrics, _ = run_training_for_params(
+        args, model, train_loader, valid_loader, optimizer, writer, checkpoint)
+
+    model.load_state_dict(torch.load(checkpoint, map_location=device))
+    model.eval()
+    _, test_probs, test_preds, _, test_labels = run_dataloader(
+        test_loader, model, optimizer, writer, do_train=False)
+
+    from src.utils.manuscript_metrics import compute_all_metrics
+    test_metrics = compute_all_metrics(
+        test_probs, test_preds, test_labels,
+        test_loader.dataset.names, test_loader.dataset.data, windows=[3])[0]
+
+    pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names),
+                open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
+    json.dump(test_metrics, open(os.path.join(args.out_dir, 'test_metrics.json'), 'w'), indent=2)
+    return best_val_metrics, test_metrics
+
+
 # Outer 5-fold nested CV  (main entry point)
 # ---------------------------------------------------------------------------
 
