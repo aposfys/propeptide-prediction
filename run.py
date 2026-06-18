@@ -1,3 +1,3 @@
-from src.train_loop_crf import parse_arguments, train_nested_cv
+from src.train_loop_crf import parse_arguments, train
 
-train_nested_cv(parse_arguments())
+train(parse_arguments())
