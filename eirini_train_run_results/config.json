@@ -1,0 +1,18 @@
+{
+   "embeddings_dir": "/home/tzermpou/pratskos/DeepPeptide/src/utils/all_embeddings",
+   "data_file": "data/labeled_sequences.csv",
+   "partitioning_file": "data/graphpart_assignments.csv",
+   "embedding": "precomputed",
+   "embedding_dim": 1280,
+   "model": "lstmcnncrf",
+   "out_dir": "train_run",
+   "epochs": 50,
+   "batch_size": 100,
+   "lr": 0.0001,
+   "dropout": 0.1,
+   "conv_dropout": 0.1,
+   "kernel_size": 3,
+   "num_filters": 32,
+   "hidden_size": 64,
+   "label_type": "multistate_with_propeptides"
+}
