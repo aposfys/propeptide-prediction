@@ -39,36 +39,62 @@ def _read_fasta(fasta_file):
     return list(sequences.values())
 
 
+MAX_LEN = 1022  # ESM3 sequence positional limit (excl. BOS/EOS)
+
+
+def _select_device(name='auto'):
+    if name != 'auto':
+        return torch.device(name)
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if torch.backends.mps.is_available():
+        return torch.device('mps')
+    return torch.device('cpu')
+
+
 from tqdm.auto import tqdm
-def generate_esm_embeddings(fasta_file, esm_embeddings_dir):
+def generate_esm_embeddings(fasta_file, esm_embeddings_dir, device='auto'):
+    '''Embed sequences with ESM3 (esm3_sm_open_v1, HuggingFace open weights).
+    Saves one (L, 1536) float32 tensor per sequence, named by MD5 hash of the sequence.
+    Sequences longer than MAX_LEN are skipped (handle separately if full coverage is needed).'''
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
 
-    esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
+    device = _select_device(device)
+    print(f'Loading ESM3 (esm3_sm_open_v1) on {device} ...')
+    esm_model = ESM3.from_pretrained('esm3_sm_open_v1').to(device).eval()
 
     dataset = _read_fasta(fasta_file)
     print(f'  {len(dataset)} unique sequences to embed')
 
+    n_done, n_skip_long, n_mismatch = 0, 0, 0
     with torch.no_grad():
-        if torch.cuda.is_available():
-            esm_model = esm_model.cuda()
-
         print('Starting to generate embeddings')
 
         for label, seq in tqdm(dataset):
             out_path = os.path.join(esm_embeddings_dir, f'{hash_aa_string(seq)}.pt')
             if os.path.isfile(out_path):
                 continue
+            if len(seq) > MAX_LEN:
+                n_skip_long += 1
+                continue
 
             protein = ESMProtein(sequence=seq)
             encoded = esm_model.encode(protein)
+            seq_tokens = encoded.sequence.unsqueeze(0).to(device)
 
-            out = esm_model(
-                sequence_tokens=encoded.sequence.unsqueeze(0),
-            )
+            out = esm_model(sequence_tokens=seq_tokens)
 
-            seq_embedding = out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS
-            torch.save(seq_embedding, out_path)
+            seq_embedding = out.embeddings[0, 1:-1].float().cpu()  # strip BOS/EOS -> (L, 1536)
+            if seq_embedding.shape[0] != len(seq):
+                n_mismatch += 1
+                print(f'  length mismatch {hash_aa_string(seq)}: emb {seq_embedding.shape[0]} vs seq {len(seq)} — skipping')
+                continue
+
+            torch.save(seq_embedding.contiguous(), out_path)  # .contiguous() avoids saving full batch storage
+            n_done += 1
+
+    print(f'Done. wrote {n_done} new embeddings; skipped {n_skip_long} seqs > {MAX_LEN} residues; {n_mismatch} length mismatches.')
 
 
 def main():
@@ -87,10 +113,14 @@ def main():
         type=pathlib.Path,
         help='output directory for extracted representations',
     )
+    parser.add_argument(
+        '--device', default='auto', choices=['auto', 'cpu', 'mps', 'cuda'],
+        help='compute device for embedding generation (default: auto -> cuda/mps/cpu)',
+    )
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
-    generate_esm_embeddings(args.fasta_file, args.output_dir)
+    generate_esm_embeddings(args.fasta_file, args.output_dir, device=args.device)
 
 
 if __name__ == '__main__':
