@@ -4,7 +4,6 @@ CRF train loop — multi-label (peptide + propeptide) prediction via ESM-2 + LST
 - no train metrics
 '''
 import json
-import math
 import pickle
 from typing import Dict, List, Tuple
 import os
@@ -14,18 +13,14 @@ from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
 from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
 from .utils.manuscript_metrics import compute_all_metrics
 from torch.optim import Adam
-from torch.optim.lr_scheduler import LambdaLR
 import torch
 import numpy as np
 import argparse
 from torch.utils.tensorboard import SummaryWriter
 
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-elif torch.backends.mps.is_available():
-    device = torch.device('mps')
-else:
-    device = torch.device('cpu')
+# Device handling is the only intended change vs the original: the original used
+# FSDP (GPU + nccl). On a machine without CUDA this resolves to CPU.
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 global_step = 0
 
 
@@ -102,21 +97,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     optimizer = Adam(model.parameters(), lr=args.lr)
     writer = SummaryWriter(args.out_dir)
 
-    # Linear warmup for first warmup_epochs, then cosine decay to 1e-6.
-    base_lr = args.lr
-    warmup_epochs = max(3, int(0.05 * args.epochs))
-
-    def _lr_lambda(epoch: int) -> float:
-        if epoch < warmup_epochs:
-            return float(epoch + 1) / float(warmup_epochs)
-        progress = float(epoch - warmup_epochs) / float(max(1, args.epochs - warmup_epochs - 1))
-        cosine_val = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
-        return max(1e-6 / base_lr, cosine_val)
-
-    scheduler = LambdaLR(optimizer, lr_lambda=_lr_lambda)
-
-    previous_best = -1.0
-    patience_counter = 0
+    previous_best = -100000000000
 
     for epoch in range(args.epochs):
 
@@ -128,28 +109,16 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
         stopping_metric = (valid_metrics['f1 peptides'] + valid_metrics['f1 propeptides']) / 2
-        scheduler.step()
-        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}  val_f1={stopping_metric:.4f}', flush=True)
 
-        improved = stopping_metric > previous_best
-        if improved:
+        if stopping_metric > previous_best:
             previous_best = stopping_metric
             best_val_metrics = valid_metrics
-            patience_counter = 0
             pickle.dump((valid_probs, valid_preds, valid_labels, valid_loader.dataset.names), open(os.path.join(args.out_dir, 'valid_outputs.pickle'), 'wb'))
-            valid_metrics['epoch'] = epoch
+            valid_metrics['epoch'] = epoch  # keep track of best early stopping.
             json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
             torch.save(model.state_dict(), os.path.join(args.out_dir, 'model.pt'))
-        else:
-            patience_counter += 1
 
-        marker = '*' if improved else ' '
-        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={stopping_metric:.4f}  best={previous_best:.4f}  patience={patience_counter}/{args.patience}  lr={current_lr:.2e}', flush=True)
-
-        if patience_counter >= args.patience:
-            print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
-            break
-    
     model.load_state_dict(torch.load(os.path.join(args.out_dir, 'model.pt')))
     test_loss, test_probs, test_preds, test_peptides, test_labels = run_dataloader(test_loader, model, optimizer, writer, do_train=False)
     #test_metrics = compute_crf_metrics(test_probs, test_preds, test_peptides, test_labels, organism=test_loader.dataset.data['organism'])
@@ -195,12 +164,12 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
         embeddings, mask, label, peptides= batch
         embeddings = embeddings.to(device)
         mask = mask.to(device)
-        label = label.long().to(device)
+        label = label.to(device)
 
         if do_train:
             pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
+            torch.nn.utils.clip_grad_norm_(model.parameters(),0.25 )
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
             optimizer.step()
             writer.add_scalar('Train/loss', loss.item(), global_step=global_step)
             global_step += 1
