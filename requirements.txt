@@ -1,11 +1,12 @@
-# Core training dependencies
+# Core training + ESM3 embedding dependencies — deeppeptide-esm3 branch.
+# esm>=3.0 provides the ESM3 SDK (esm3_sm_open_v1 open weights from HuggingFace Hub).
+# torch>=2.0 is required by the esm SDK and the modernised model code. FSDP/fairscale unused.
 esm>=3.0.0
-fairscale==0.4.10
-matplotlib==3.5.1
-pandas>=1.5.0
-scikit-learn==1.0.2
-scipy==1.8.0
-seaborn==0.11.2
-tensorboard>=2.8.0
 torch>=2.0.0
+pandas>=1.5.0
+scikit-learn>=1.0.2
+scipy>=1.8.0
+tensorboard>=2.8.0
 tqdm>=4.64.0
+matplotlib>=3.5.1
+seaborn>=0.11.2
