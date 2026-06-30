@@ -5,7 +5,7 @@ https://www.science.org/doi/10.1126/science.ade2574
 
 This branch replaces the ESM-2 embedder with **ESM3** (`esm3_sm_open_v1`, 1536-dim)
 while keeping the full multi-label CRF (propeptide + mature peptide coordinates).
-CPU compatible: the distributed backend falls back to `gloo` when no GPU is available.
+Runs on CUDA or CPU (single device; the original FSDP/distributed wrapper was removed).
 
 Embedder: `esm3_sm_open_v1` (ESM3, 1536-dim per residue).
 
@@ -71,11 +71,11 @@ python run.py \
 | `--embedding_dim` | 1536 | ESM3 output dimension |
 | `--epochs` | 30 | max training epochs (subject to early stopping) |
 | `--batch_size` | 100 | sequences per batch |
-| `--patience` | 10 | early stopping: epochs without mean peptide+propeptide F1 improvement |
+| `--patience` | 10 | unused (kept for CLI compatibility); the loop runs all epochs and keeps the best-validation checkpoint |
 | `--label_type` | `multistate_with_propeptides` | CRF label scheme |
 | `--model` | `lstmcnncrf` | model architecture |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
-| `--lr` | 1e-4 | peak learning rate (warmed up linearly, then cosine-decayed) |
+| `--lr` | 1e-4 | learning rate (constant — faithful to the original, no scheduler) |
 | `--dropout` | 0.1 | input dropout |
 | `--conv_dropout` | 0.1 | conv layer dropout |
 | `--num_filters` | 32 | number of CNN filters |
@@ -95,6 +95,46 @@ The published results were produced by running 5-fold nested CV (5 outer folds �
 requires the original checkpoint directories and cannot be re-run without them.
 
 - PeptideLocator was evaluated as a licensed executable and cannot be provided in this repo.
+
+---
+
+## Results — ESM3 (single fold, default HPs)
+
+Single split (`train=[0,1,2]`, `val=[3]`, `test=[4]`), 50 epochs, best-checkpoint-on-validation
+(stopping metric = mean of peptide & propeptide F1), ±3-residue tolerance. ESM3 embeddings:
+`esm3_sm_open_v1`, 1536-dim, layer-final, full 8061/8061 coverage. **All rows below use the code's
+_default_ hyperparameters** (lr 1e-4, dropout 0.1, batch 100, kernel 3, filters 32, hidden 64):
+
+| embedder (default HPs) | f1 peptides | f1 propeptides | f1 all |
+|---|---|---|---|
+| ESM-2 (1280-d) | 0.399 | 0.462 | 0.429 |
+| **ESM3 (1536-d)** | **0.395** | **0.496** | **0.448** |
+| ProstT5 (1024-d)¹ | 0.200 | 0.242 | 0.220 |
+
+At default HPs, **ESM3 modestly edges ESM-2** (higher propeptide + overall F1; peptide tied), and
+both clearly beat ProstT5.
+
+> ⚠️ **These default-HP numbers are *not* at published-performance level.** The default learning
+> rate (1e-4) under-trains the model. On the `main` branch the *same* ESM-2 setup with the paper's
+> Optuna-tuned hyperparameters (Supplementary Table S2, fold T4) jumps to **peptide F1 0.579 /
+> propeptide F1 0.590** — ~0.15 higher. So a fair ESM-2-vs-ESM3 comparison needs **tuned HPs for
+> ESM3 too**. The paper only published hyperparameters for ESM-1b/ESM-2 (Table S2), so ESM3 requires
+> either a fresh Optuna search or reuse of the ESM-2 T4 HPs. **Pending — do not draw conclusions
+> from the default-HP table above.**
+
+Reproduce (ESM3, default HPs):
+
+```bash
+python run.py \
+    --embeddings_dir PATH/TO/ESM3_EMBEDDINGS \
+    -df data/labeled_sequences.csv -pf data/graphpart_assignments.csv \
+    --embedding_dim 1536 --epochs 50 --out_dir results/esm3
+```
+
+If some sequences >1022 residues are missing from your ESM3 embeddings, filter
+`labeled_sequences.csv` to the embedded subset first (match by MD5 hash of the sequence).
+
+¹ ProstT5 was run with the same faithful code from the `deeppeptide-prost5` branch; shown here for comparison.
 
 ---
 
