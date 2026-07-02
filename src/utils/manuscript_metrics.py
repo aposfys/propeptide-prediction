@@ -12,8 +12,11 @@ import pickle
 from typing import List, Tuple
 from tqdm.auto import tqdm
 
-PEPTIDE_START_STATE, PEPTIDE_END_STATE = 1, 50
-PROPEPTIDE_START_STATE, PROPEPTIDE_END_STATE = 51, 100
+# Propeptide-only model: propeptides are encoded in states 1-50 (see dataset.py,
+# start_state=1, max_len=50). There are no peptides, so the PEPTIDE range is set to
+# states that never occur, keeping f1 peptides cleanly 0.
+PEPTIDE_START_STATE, PEPTIDE_END_STATE = 900, 950
+PROPEPTIDE_START_STATE, PROPEPTIDE_END_STATE = 1, 50
 
 def convert_path_to_peptide_borders(pred: List[int], start_state, stop_state, offset: int=0) -> List[Tuple[int,int]]:
     '''
