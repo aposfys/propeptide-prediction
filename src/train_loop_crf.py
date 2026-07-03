@@ -1,7 +1,7 @@
 '''
 CRF train loop — propeptide-only, ESM-2 embeddings.
-- LR warmup + cosine decay
-- patience-based early stopping on propeptide F1
+- faithful to the original: constant Adam LR, all epochs, best-on-validation checkpoint
+- stopping metric = propeptide F1
 - no marginals during training
 - no train metrics
 '''
