@@ -1,11 +1,14 @@
 '''
 CRF train loop — propeptide-only, ESM-2 embeddings.
-- faithful to the original: constant Adam LR, all epochs, best-on-validation checkpoint
+- LR warmup + cosine decay: REQUIRED here for numerical stability. The propeptide-only CRF
+  overflows to NaN under a constant LR once the model gets confident; decaying the LR prevents
+  it. Otherwise faithful to the original: all epochs, best-on-validation checkpoint, no early stop.
 - stopping metric = propeptide F1
 - no marginals during training
 - no train metrics
 '''
 import json
+import math
 import pickle
 from typing import Dict, List, Tuple
 import os
@@ -16,6 +19,7 @@ from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
 #from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
 from .utils.manuscript_metrics import compute_all_metrics
 from torch.optim import Adam
+from torch.optim.lr_scheduler import LambdaLR
 import torch
 import numpy as np
 import argparse
@@ -101,6 +105,20 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     optimizer = Adam(model.parameters(), lr=args.lr)
     writer = SummaryWriter(args.out_dir)
 
+    # Linear warmup then cosine decay to ~0. --lr is the peak. Needed for CRF numerical stability
+    # on the propeptide-only model (constant LR overflows to NaN); does not early-stop.
+    base_lr = args.lr
+    warmup_epochs = max(3, int(0.05 * args.epochs))
+
+    def _lr_lambda(epoch: int) -> float:
+        if epoch < warmup_epochs:
+            return float(epoch + 1) / float(warmup_epochs)
+        progress = float(epoch - warmup_epochs) / float(max(1, args.epochs - warmup_epochs - 1))
+        cosine_val = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return max(1e-6 / base_lr, cosine_val)
+
+    scheduler = LambdaLR(optimizer, lr_lambda=_lr_lambda)
+
     previous_best = -100000000000
 
     for epoch in range(args.epochs):
@@ -113,7 +131,9 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
         stopping_metric = valid_metrics['f1 propeptides']
-        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}  val_f1={stopping_metric:.4f}', flush=True)
+        scheduler.step()
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}  val_f1={stopping_metric:.4f}  lr={current_lr:.2e}', flush=True)
 
         if stopping_metric > previous_best:
             previous_best = stopping_metric
