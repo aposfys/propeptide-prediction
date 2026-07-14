@@ -127,16 +127,20 @@ def get_counts_for_protein(true_start_stop: List[Tuple[int,int]], pred_start_sto
     pred_df = pd.DataFrame([starts, stops], index = ['start', 'stop']).T
     pred_df['matched'] = False
 
-    for idx, row in true_df.iterrows():
-        true_start, true_stop = row['start'], row['stop']
+    for true_idx, true_row in true_df.iterrows():
+        true_start, true_stop = true_row['start'], true_row['stop']
 
-        for idx, row in pred_df.iterrows():
-            pred_start, pred_stop = row['start'], row['stop']
+        for pred_idx, pred_row in pred_df.iterrows():
+            pred_start, pred_stop = pred_row['start'], pred_row['stop']
             start_match = pred_start >= true_start-tolerance and pred_start <= true_start + tolerance
             stop_match = pred_stop >= true_stop-tolerance and pred_stop <= true_stop + tolerance
             if start_match and stop_match:
-                true_df.loc[idx, 'matched'] = True
-                pred_df.loc[idx, 'matched'] = True
+                # NOTE: use the true index on true_df and the pred index on pred_df.
+                # The upstream code reused `idx` for both loops, so a matched true was
+                # marked at the pred's index -> phantom rows dropped by groupby('group')
+                # -> TP undercounted / FN overcounted (recall & F1 understated).
+                true_df.loc[true_idx, 'matched'] = True
+                pred_df.loc[pred_idx, 'matched'] = True
                 break # no need to check rest. peptide need only match one.
 
     
