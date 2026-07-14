@@ -3,43 +3,8 @@ The CRF state space models. Many parameters are hardcoded due to the complexity 
 '''
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from .multi_tag_crf import CRF
 from .lstm_cnn import LSTMCNN
-
-
-def _focal_loss_on_emissions(
-    raw_emissions: torch.Tensor,
-    targets: torch.Tensor,
-    mask: torch.Tensor,
-    gamma: float = 2.0,
-) -> torch.Tensor:
-    '''Binary focal loss on the 2-logit emissions (background / propeptide).
-
-    Computes inverse-class-frequency alpha weighting from the current batch so
-    it adapts to per-fold propeptide density without a fixed prior.
-
-    raw_emissions : (batch, L, 2)  — before _repeat_emissions
-    targets       : (batch, L)     — CRF state labels; state 0 = background
-    mask          : (batch, L)     — 1 for real positions, 0 for padding
-    '''
-    mask_f = mask.float()
-    binary = (targets > 0).float()                        # 1 = propeptide
-
-    n_pos = (binary * mask_f).sum().clamp(min=1.0)
-    n_neg = ((1 - binary) * mask_f).sum().clamp(min=1.0)
-    total = n_pos + n_neg
-    alpha_t = binary * (n_neg / total) + (1 - binary) * (n_pos / total)
-
-    # Softmax over both logits — consistent with how _repeat_emissions feeds the CRF.
-    # log_softmax[..., 1] = log P(propeptide), [..0] = log P(background).
-    log_sm  = F.log_softmax(raw_emissions, dim=-1)        # (batch, L, 2)
-    log_p_t = log_sm.gather(-1, binary.long().unsqueeze(-1)).squeeze(-1)
-    p_t     = log_p_t.exp()
-    focal   = -alpha_t * (1 - p_t).pow(gamma) * log_p_t
-
-    return (focal * mask_f).sum() / mask_f.sum().clamp(min=1.0)
-
 
 
 class CRFBaseModel(nn.Module):
@@ -118,7 +83,7 @@ class CRFBaseModel(nn.Module):
 
 
     def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False,
-                top_k: int = 1, use_focal: bool = False):
+                top_k: int = 1):
 
         features = self.feature_extractor(embeddings, mask)
         raw_emissions = self.features_to_emissions(features)   # (batch, L, 2)
@@ -134,13 +99,7 @@ class CRFBaseModel(nn.Module):
                                 mask=mask.byte(), reduction='mean') * -1
             if crf_loss.item() > 10000:
                 self._debug_crf(targets)
-
-            if use_focal:
-                focal = _focal_loss_on_emissions(raw_emissions, targets, mask)
-                loss = crf_loss + 0.1 * focal
-            else:
-                loss = crf_loss
-
+            loss = crf_loss
             return (probs, viterbi_paths, loss)
         else:
             return probs, viterbi_paths, path_probs
@@ -271,32 +230,8 @@ class LSTMCNNCRF(CRFBaseModel):
 
         allowed_transitions, allowed_start, allowed_end = self.get_crf_constraints(self.max_len, self.min_len)
         self.crf = CRF(num_states, batch_first=True, allowed_transitions=allowed_transitions, allowed_start=allowed_start, allowed_end=allowed_end)
-
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        '''Xavier/Kaiming initialization for all trainable layers.
-
-        Downstream heads on top of frozen LMs benefit from controlled init:
-        the LM already provides rich features, so the head should start with
-        small, balanced weights rather than PyTorch's layer-type defaults.
-        '''
-        fe = self.feature_extractor
-        # Conv1: compresses ESM-2 1280-dim → n_filters; kaiming for ReLU
-        nn.init.kaiming_uniform_(fe.conv1.weight, nonlinearity='relu')
-        nn.init.zeros_(fe.conv1.bias)
-        # Conv2: hidden*2 → n_filters*2 after biLSTM; kaiming for ReLU
-        nn.init.kaiming_uniform_(fe.conv2.weight, nonlinearity='relu')
-        nn.init.zeros_(fe.conv2.bias)
-        # biLSTM: Xavier for all weight matrices, zeros for biases
-        for name, param in fe.biLSTM.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_uniform_(param)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
-        # Emission head: Xavier (no nonlinearity after Linear)
-        nn.init.xavier_uniform_(self.features_to_emissions.weight)
-        nn.init.zeros_(self.features_to_emissions.bias)
+        # NOTE: no custom weight init — the original DeepPeptide uses PyTorch default
+        # initialization. Kept faithful on purpose.
 
 
 
@@ -325,8 +260,7 @@ class SimpleLSTMCNNCRF(CRFBaseModel):
 
 
     # redefine forward because no emission repeating.
-    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False, use_focal: bool = False):
-        # use_focal accepted for API compatibility with CRFBaseModel; not applied here (simple 2-state CRF)
+    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False):
         features = self.feature_extractor(embeddings, mask)
         emissions = self.features_to_emissions(features)
 
