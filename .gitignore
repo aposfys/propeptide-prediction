@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.Rhistory
+
+# Heavy training artifacts — keep the small JSON metrics, drop everything large.
+# (results/ is otherwise tracked so *_metrics.json can be committed as the record.)
+results/**/*.pickle
+results/**/*.pt
+results/**/events.out.tfevents.*
+
+# Local scratch
+*.docx
