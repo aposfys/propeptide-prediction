@@ -240,32 +240,8 @@ class LSTMCNNCRF(CRFBaseModel):
 
         allowed_transitions, allowed_start, allowed_end = self.get_crf_constraints(self.max_len, self.min_len)
         self.crf = CRF(num_states, batch_first=True, allowed_transitions=allowed_transitions, allowed_start=allowed_start, allowed_end=allowed_end)
-
-        self._init_weights()
-
-    def _init_weights(self) -> None:
-        '''Xavier/Kaiming initialization for all trainable layers.
-
-        Downstream heads on top of frozen LMs benefit from controlled init:
-        the LM already provides rich features, so the head should start with
-        small, balanced weights rather than PyTorch's layer-type defaults.
-        '''
-        fe = self.feature_extractor
-        # Conv1: compresses ESM3 1536-dim → n_filters; kaiming for ReLU
-        nn.init.kaiming_uniform_(fe.conv1.weight, nonlinearity='relu')
-        nn.init.zeros_(fe.conv1.bias)
-        # Conv2: n_filters*2 → n_filters*2 after biLSTM; kaiming for ReLU
-        nn.init.kaiming_uniform_(fe.conv2.weight, nonlinearity='relu')
-        nn.init.zeros_(fe.conv2.bias)
-        # biLSTM: Xavier for all weight matrices, zeros for biases
-        for name, param in fe.biLSTM.named_parameters():
-            if 'weight' in name:
-                nn.init.xavier_uniform_(param)
-            elif 'bias' in name:
-                nn.init.zeros_(param)
-        # Emission head: Xavier (no nonlinearity after Linear)
-        nn.init.xavier_uniform_(self.features_to_emissions.weight)
-        nn.init.zeros_(self.features_to_emissions.bias)
+        # NOTE: no custom weight init — the original DeepPeptide uses PyTorch default
+        # initialization. Kept faithful on purpose (matches the esm2-propeptide model).
 
 
 
