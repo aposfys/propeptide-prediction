@@ -10,7 +10,6 @@ Training protocol (DeepPeptide, Bioinformatics 2023):
   - Loss: negative log-likelihood of the CRF (Viterbi / forward-backward).
 '''
 import json
-import math
 import os
 import pickle
 from typing import Dict, List, Tuple
@@ -19,7 +18,6 @@ import numpy as np
 import optuna
 import torch
 from torch.optim import Adam
-from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -197,33 +195,24 @@ def run_training_for_params(
     writer: SummaryWriter,
     checkpoint_path: str,
 ) -> Tuple[Dict, float]:
-    '''Train up to args.epochs with patience-based early stopping on propeptide F1.'''
+    '''Train for args.epochs with a constant LR and best-on-validation checkpointing.
+
+    Faithful to the original DeepPeptide loop and identical to the esm2-propeptide
+    model: constant Adam LR (no scheduler), no focal loss. Early stopping on
+    propeptide F1 is retained, but the best checkpoint is saved regardless, so it
+    does not change the reported (best-checkpoint) result — it only skips the
+    divergent tail.
+    '''
     global global_step
     global_step = 0
 
     best_score = -1.0
     best_val_metrics = None
     patience_counter = 0
-    use_focal = getattr(args, 'use_focal', True)
-
-    # Linear warmup for the first warmup_epochs, then cosine decay to 1e-6.
-    # Each inner fold gets a fresh scheduler because run_training_for_params is
-    # called once per fold — no manual reset needed.
-    base_lr = args.lr
-    warmup_epochs = max(3, int(0.05 * args.epochs))
-
-    def _lr_lambda(epoch: int) -> float:
-        if epoch < warmup_epochs:
-            return float(epoch + 1) / float(warmup_epochs)
-        progress = float(epoch - warmup_epochs) / float(max(1, args.epochs - warmup_epochs - 1))
-        cosine_val = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
-        return max(1e-6 / base_lr, cosine_val)
-
-    scheduler = LambdaLR(optimizer, lr_lambda=_lr_lambda)
 
     for epoch in range(args.epochs):
         train_loss, _, _, _, _ = run_dataloader(
-            train_loader, model, optimizer, writer, do_train=True, use_focal=use_focal,
+            train_loader, model, optimizer, writer, do_train=True,
         )
 
         _, valid_probs, valid_preds, _, valid_labels = run_dataloader(
@@ -236,9 +225,7 @@ def run_training_for_params(
         )[0]
 
         score = valid_metrics['f1 propeptides']
-        scheduler.step()
         writer.add_scalar('Valid/f1_propeptides', score, global_step=epoch)
-        current_lr = optimizer.param_groups[0]['lr']
 
         improved = score > best_score
         if improved:
@@ -253,7 +240,7 @@ def run_training_for_params(
         print(
             f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  '
             f'val_f1={score:.4f}  best={best_score:.4f}  '
-            f'patience={patience_counter}/{args.patience}  lr={current_lr:.2e}',
+            f'patience={patience_counter}/{args.patience}',
             flush=True,
         )
 
@@ -295,7 +282,7 @@ def objective(
     #   weight_decay=1e-4 — light L2, not critical with only ~6k sequences
     #
     # Searched (most impact on ESM3 performance):
-    #   lr           — most sensitive; LR scheduler handles decay automatically
+    #   lr           — most sensitive; searched on a log scale (constant LR, no scheduler)
     #   num_filters  — controls 1536→n_filters compression bottleneck (64 = 24:1,
     #                  128 = 12:1); must be ≥64 for ESM3
     #   hidden_size  — LSTM state size; must be ≥ n_filters/2 to avoid underfitting
