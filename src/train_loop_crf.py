@@ -263,6 +263,40 @@ def run_training_for_params(
 # Optuna inner loop
 # ---------------------------------------------------------------------------
 
+# Search-space presets, selected with --space.
+#
+# 'table_s1' (default) is the paper's own space (btad616 Table S1), the one the
+# ESM-1b / ESM-2 models were tuned over. Use it for any result you intend to
+# compare against the published ESM-2 numbers: tuning both embedders over the
+# same space is what makes "ESM3 vs ESM-2" a statement about the embedder rather
+# than about who got the bigger search.
+#
+# 'wide' loosens every bound and additionally searches weight_decay. It answers a
+# different question — "what is the best this architecture can do with ESM3,
+# ignoring comparability" — and it is strictly exploratory:
+#   * it is NOT comparable to the ESM-2 T4 result;
+#   * it needs a substantially larger --n_trials to cover the bigger volume;
+#     re-using the table_s1 trial budget here samples more thinly and usually
+#     scores WORSE, not better.
+# Upper bounds are still finite because the model has physical limits: lr much
+# above 5e-2 diverges the CRF NLL, and batch/hidden size are bounded by VRAM and
+# wall-clock rather than by taste.
+SEARCH_SPACES = {
+    'table_s1': dict(
+        lr=(1e-4, 1e-2), batch_size=(10, 100, 10), dropout=(0.0, 0.7),
+        conv_dropout=(0.0, 0.7), kernel_size=(1, 5, 2),
+        num_filters=(40, 128, 8), hidden_size=(16, 192, 16),
+        weight_decay=None,           # Table S1 omits it; upstream leaves Adam at 0
+    ),
+    'wide': dict(
+        lr=(1e-5, 5e-2), batch_size=(8, 128, 8), dropout=(0.0, 0.8),
+        conv_dropout=(0.0, 0.8), kernel_size=(1, 9, 2),
+        num_filters=(16, 256, 16), hidden_size=(16, 384, 16),
+        weight_decay=(1e-8, 1e-2),   # searched log-uniform
+    ),
+}
+
+
 def objective(
     trial: optuna.Trial,
     args: argparse.Namespace,
@@ -323,33 +357,43 @@ def objective(
     Every tunable is a real `suggest_*` call, so `study.best_params` is a
     complete, self-sufficient record of the winning configuration.
     '''
-    # Learning rate: log-uniform 1e-4 .. 1e-2 (Table S1). Constant LR, no
-    # scheduler, so this single value is the entire schedule. The old range
-    # capped at 3e-4 and could not reach T4's 5.5e-3.
-    args.lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
+    space = SEARCH_SPACES[args.space]
 
-    # Batch size: 10 .. 100 in steps of 10 (Table S1).
-    args.batch_size = trial.suggest_int('batch_size', 10, 100, step=10)
+    # Learning rate: log-uniform. Constant LR, no scheduler, so this single value
+    # is the entire schedule. (The old range capped at 3e-4 and could not reach
+    # T4's 5.5e-3.)
+    args.lr = trial.suggest_float('lr', *space['lr'], log=True)
 
-    # Embedding and convolution dropout: 0 .. 0.7 uniform, searched
-    # INDEPENDENTLY (Table S1 lists them as two parameters, and T4 pairs a heavy
-    # 0.6902 embedding dropout with a much lighter 0.2672 conv dropout — tying
-    # them to one value makes that optimum unreachable).
-    args.dropout      = trial.suggest_float('dropout', 0.0, 0.7)
-    args.conv_dropout = trial.suggest_float('conv_dropout', 0.0, 0.7)
+    # Batch size: stepped integer.
+    args.batch_size = trial.suggest_int('batch_size', *space['batch_size'][:2],
+                                        step=space['batch_size'][2])
 
-    # Kernel size: 1 .. 5 in steps of 2, i.e. {1, 3, 5} (Table S1). All odd, which
-    # is also what LSTMCNN requires: conv1 pads with filter_size // 2, preserving
+    # Embedding and convolution dropout, searched INDEPENDENTLY: Table S1 lists
+    # them as two parameters, and T4 pairs a heavy 0.6902 embedding dropout with a
+    # much lighter 0.2672 conv dropout — tying them to one value makes that
+    # optimum unreachable.
+    args.dropout      = trial.suggest_float('dropout', *space['dropout'])
+    args.conv_dropout = trial.suggest_float('conv_dropout', *space['conv_dropout'])
+
+    # Kernel size: odd values only. That is what Table S1 specifies (1..5 step 2)
+    # and also what LSTMCNN requires: conv1 pads with filter_size // 2, preserving
     # sequence length only for odd sizes. An even kernel yields L+1 and trips the
     # `bi_out.size(1) == seq_lengths.max()` assert downstream.
-    args.kernel_size = trial.suggest_int('kernel_size', 1, 5, step=2)
+    args.kernel_size = trial.suggest_int('kernel_size', *space['kernel_size'][:2],
+                                         step=space['kernel_size'][2])
 
-    # CNN channels: 40 .. 128 step 8 (Table S1). This is conv1's 1536 -> n_filters
-    # compression, the model's main bottleneck.
-    args.num_filters = trial.suggest_int('num_filters', 40, 128, step=8)
+    # CNN channels: conv1's 1536 -> n_filters compression, the main bottleneck.
+    args.num_filters = trial.suggest_int('num_filters', *space['num_filters'][:2],
+                                         step=space['num_filters'][2])
 
-    # LSTM hidden size: 16 .. 192 step 16 (Table S1).
-    args.hidden_size = trial.suggest_int('hidden_size', 16, 192, step=16)
+    # biLSTM hidden state size.
+    args.hidden_size = trial.suggest_int('hidden_size', *space['hidden_size'][:2],
+                                         step=space['hidden_size'][2])
+
+    # Only the 'wide' preset searches weight_decay; table_s1 leaves it at the CLI
+    # default (0.0), matching upstream's untouched Adam.
+    if space['weight_decay'] is not None:
+        args.weight_decay = trial.suggest_float('weight_decay', *space['weight_decay'], log=True)
 
     inner_scores = []
     orig_epochs = args.epochs
@@ -466,8 +510,22 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         print(f'GPU: {torch.cuda.get_device_name(0)}', flush=True)
     else:
         print(
-            'WARNING: no CUDA device visible — this search will run on CPU and take '
-            'far longer than intended.',
+            f'WARNING: no CUDA GPU visible — running on {device.type}. This works, '
+            'but a full search will take far longer than on a GPU.',
+            flush=True,
+        )
+
+    # Record the space in the log: 'wide' results must never be reported next to
+    # the ESM-2 T4 number as though they were comparable.
+    print(f'Search space: {args.space}  ({args.n_trials} trials per outer fold)', flush=True)
+    for name, bounds in SEARCH_SPACES[args.space].items():
+        print(f'    {name:14} {bounds if bounds is not None else "not searched"}', flush=True)
+    if args.space == 'wide':
+        print(
+            'NOTE: --space wide is exploratory. It is NOT comparable to the ESM-2 T4\n'
+            '      result (which was tuned over table_s1), and a bigger space needs a\n'
+            '      bigger --n_trials — reusing the table_s1 budget samples it thinly\n'
+            '      and typically scores worse.',
             flush=True,
         )
 
@@ -675,6 +733,12 @@ def parse_arguments() -> argparse.Namespace:
                         'imbalance (--use-focal to enable). Default off: this is the '
                         'faithful loop, and the reported ESM3/ESM-2 propeptide numbers '
                         'were produced without it.')
+    p.add_argument('--space', type=str, default='table_s1', choices=sorted(SEARCH_SPACES),
+                   help="Search space preset. 'table_s1' (default) is the paper's own "
+                        'space (btad616 Table S1) — use it for anything compared against '
+                        "the published ESM-2 numbers. 'wide' loosens every bound and also "
+                        'searches weight_decay; exploratory only, not comparable to the '
+                        'ESM-2 T4 result, and needs a larger --n_trials to be meaningful.')
     p.add_argument('--seed', type=int, default=42,
                    help='Seed for the Optuna TPE sampler and torch, so a search is reproducible.')
     p.add_argument('--prune', action='store_true',
