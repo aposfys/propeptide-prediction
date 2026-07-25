@@ -65,17 +65,20 @@ def get_dataloaders(
     )
 
     nw = getattr(args, 'num_workers', 2)
+    # pin_memory speeds up the host->GPU copy of the padded embedding batches,
+    # which are the largest tensors moved each step (1536 x L_max x batch).
+    pin = device.type == 'cuda'
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True,
-        collate_fn=train_set.collate_fn, num_workers=nw,
+        collate_fn=train_set.collate_fn, num_workers=nw, pin_memory=pin,
     )
     valid_loader = DataLoader(
         valid_set, batch_size=args.batch_size, shuffle=False,
-        collate_fn=valid_set.collate_fn, num_workers=max(0, nw - 1),
+        collate_fn=valid_set.collate_fn, num_workers=max(0, nw - 1), pin_memory=pin,
     )
     test_loader = DataLoader(
         test_set, batch_size=args.batch_size, shuffle=False,
-        collate_fn=test_set.collate_fn, num_workers=max(0, nw - 1),
+        collate_fn=test_set.collate_fn, num_workers=max(0, nw - 1), pin_memory=pin,
     )
     return train_loader, valid_loader, test_loader
 
@@ -194,14 +197,18 @@ def run_training_for_params(
     optimizer: torch.optim.Optimizer,
     writer: SummaryWriter,
     checkpoint_path: str,
+    use_focal: bool = False,
 ) -> Tuple[Dict, float]:
     '''Train for args.epochs with a constant LR and best-on-validation checkpointing.
 
     Faithful to the original DeepPeptide loop and identical to the esm2-propeptide
-    model: constant Adam LR (no scheduler), no focal loss. Early stopping on
-    propeptide F1 is retained, but the best checkpoint is saved regardless, so it
-    does not change the reported (best-checkpoint) result — it only skips the
-    divergent tail.
+    model: constant Adam LR (no scheduler). Early stopping on propeptide F1 is
+    retained, but the best checkpoint is saved regardless, so it does not change
+    the reported (best-checkpoint) result — it only skips the divergent tail.
+
+    `use_focal` adds the auxiliary focal term on the emissions. It defaults to
+    False, which is the faithful setting and the one the published ESM3/ESM-2
+    propeptide numbers were produced with.
     '''
     global global_step
     global_step = 0
@@ -213,6 +220,7 @@ def run_training_for_params(
     for epoch in range(args.epochs):
         train_loss, _, _, _, _ = run_dataloader(
             train_loader, model, optimizer, writer, do_train=True,
+            use_focal=use_focal,
         )
 
         _, valid_probs, valid_preds, _, valid_labels = run_dataloader(
@@ -264,38 +272,84 @@ def objective(
 ) -> float:
     '''4-fold inner CV objective for Optuna hyperparameter search.
 
-    Search space is calibrated for ESM3 (1536-dim) + propeptide-only CRF:
-      - num_filters / hidden_size start at 32 (not 16) because ESM3 is more
-        expressive and the model needs capacity to exploit it.
-      - batch_size upper bound is 64 (not 128) to stay within GPU VRAM when
-        sequences are padded to their longest member (1536 × L × batch).
-      - weight_decay is searched to regularize against the richer ESM3 features.
-    '''
-    # Search space narrowed for ESM3 (1536-dim) + small Optuna budget (5 trials).
-    #
-    # Architecture data-flow: (batch,1536,L) → Conv1(1536→n_filters) → biLSTM
-    # → Conv2(hidden*2→n_filters*2) → Linear(n_filters*2→2) → 51-state CRF
-    #
-    # Fixed (not searched):
-    #   batch_size=64  — largest stable batch; fewer iterations per epoch = faster
-    #   kernel_size=3  — short local context is what matters for cleavage sites
-    #   weight_decay=1e-4 — light L2, not critical with only ~6k sequences
-    #
-    # Searched (most impact on ESM3 performance):
-    #   lr           — most sensitive; searched on a log scale (constant LR, no scheduler)
-    #   num_filters  — controls 1536→n_filters compression bottleneck (64 = 24:1,
-    #                  128 = 12:1); must be ≥64 for ESM3
-    #   hidden_size  — LSTM state size; must be ≥ n_filters/2 to avoid underfitting
-    #   dropout      — single dropout rate applied at both input and conv layers
-    args.batch_size   = 64
-    args.kernel_size  = 3
-    args.weight_decay = 1e-4
+    Architecture data-flow: (batch,1536,L) → Conv1(1536→n_filters) → biLSTM
+    → Conv2(hidden*2→n_filters*2) → Linear(n_filters*2→2) → 51-state CRF
 
-    args.lr          = trial.suggest_float('lr', 5e-5, 3e-4, log=True)
-    args.num_filters = trial.suggest_categorical('num_filters', [64, 128])
-    args.hidden_size = trial.suggest_categorical('hidden_size', [64, 128])
-    args.dropout     = trial.suggest_float('dropout', 0.1, 0.3)
-    args.conv_dropout = args.dropout  # tie the two dropout rates
+    Provenance of the ranges. Upstream DeepPeptide (fteufel/DeepPeptide) ships no
+    hyperparameter-search code — only the training loop with fixed CLI values — so
+    the search space is taken from the paper instead: DeepPeptide (Bioinformatics
+    2023, btad616) **Table S1**, the space used for the ESM-1b and ESM-2 models,
+    reproduced here parameter-for-parameter. `weight_decay` is deliberately NOT
+    searched, because Table S1 does not include it and upstream never exposes it
+    (Adam runs at its default 0).
+
+    Table S1                     lower    upper    distribution
+      Learning rate              0.0001   0.01     log-uniform
+      Batch size                 10       100      step 10
+      Embedding dropout          0        0.7      uniform
+      Convolution dropout        0        0.7      uniform
+      Kernel size                1        5        step 2
+      CNN channels               40       128      step 8
+      LSTM hidden size           16       192      step 16
+
+    The space is explored exactly as the paper describes it: "explored in nested
+    cross-validation (best set determined by average validation performance on 4
+    inner fold models)" — i.e. the mean over the 4 inner folds below. Table S2's
+    per-fold winners (T0..T4) all fall inside these ranges, including the T4 set
+    that produced the ESM-2 propeptide F1 of 0.626 (lr 0.0055, batch 20, dropout
+    0.6902/0.2672, kernel 5, channels 48, hidden 48).
+
+    Why Table S1's space for a *different* model. This is an ESM3 (1536-dim),
+    propeptide-only (2-label / 51-state) model, not the ESM-1b/ESM-2 (1280-dim)
+    one Table S1 was written for — so reusing the space is a deliberate choice,
+    not an assumption that the two share an optimum:
+      1. Comparability. ESM-2 got Table S1's space; giving ESM3 a different one
+         would confound the comparison, because an F1 gap could then come from
+         the search rather than from the embedder. Same space = clean read.
+      2. The embedder change does not touch the searched axes. 1280 -> 1536 only
+         alters conv1's *input* channel count, which is fixed by --embedding_dim
+         and never searched. Every searched parameter acts downstream of that
+         projection, so its useful range is essentially unmoved.
+      3. The ranges are broad, not ESM-2-specific: lr spans two orders of
+         magnitude, both dropouts span 0-0.7, channels 40-128, hidden 16-192.
+    If ESM3's optimum really does sit outside this box, the search says so by
+    piling every fold's winner against a bound — summarize_optuna.py checks for
+    exactly that on lr and prints a warning telling you to widen it. Widen it
+    from evidence, not preemptively.
+
+    Nothing about the per-epoch training logic changes — that stays upstream's
+    (constant Adam LR, no scheduler, no focal term). Only which values get tried.
+
+    Every tunable is a real `suggest_*` call, so `study.best_params` is a
+    complete, self-sufficient record of the winning configuration.
+    '''
+    # Learning rate: log-uniform 1e-4 .. 1e-2 (Table S1). Constant LR, no
+    # scheduler, so this single value is the entire schedule. The old range
+    # capped at 3e-4 and could not reach T4's 5.5e-3.
+    args.lr = trial.suggest_float('lr', 1e-4, 1e-2, log=True)
+
+    # Batch size: 10 .. 100 in steps of 10 (Table S1).
+    args.batch_size = trial.suggest_int('batch_size', 10, 100, step=10)
+
+    # Embedding and convolution dropout: 0 .. 0.7 uniform, searched
+    # INDEPENDENTLY (Table S1 lists them as two parameters, and T4 pairs a heavy
+    # 0.6902 embedding dropout with a much lighter 0.2672 conv dropout — tying
+    # them to one value makes that optimum unreachable).
+    args.dropout      = trial.suggest_float('dropout', 0.0, 0.7)
+    args.conv_dropout = trial.suggest_float('conv_dropout', 0.0, 0.7)
+
+    # Kernel size: 1 .. 5 in steps of 2, i.e. {1, 3, 5} (Table S1). All odd, which
+    # is also what LSTMCNN requires: conv1 pads with filter_size // 2, preserving
+    # sequence length only for odd sizes. An even kernel yields L+1 and trips the
+    # `bi_out.size(1) == seq_lengths.max()` assert downstream.
+    args.kernel_size = trial.suggest_int('kernel_size', 1, 5, step=2)
+
+    # CNN channels: 40 .. 128 step 8 (Table S1). This is conv1's 1536 -> n_filters
+    # compression, the model's main bottleneck.
+    args.num_filters = trial.suggest_int('num_filters', 40, 128, step=8)
+
+    # LSTM hidden size: 16 .. 192 step 16 (Table S1).
+    args.hidden_size = trial.suggest_int('hidden_size', 16, 192, step=16)
 
     inner_scores = []
     orig_epochs = args.epochs
@@ -319,14 +373,28 @@ def objective(
                 os.path.join(args.out_dir, f'trial{trial.number}_outer{outer_fold}_inner{inner_i}')
             )
 
-            _, score = run_training_for_params(
-                args, model, train_loader, valid_loader, optimizer, writer, ckpt,
-            )
-            inner_scores.append(score)
-            writer.close()
+            try:
+                _, score = run_training_for_params(
+                    args, model, train_loader, valid_loader, optimizer, writer, ckpt,
+                    use_focal=args.use_focal,
+                )
+            finally:
+                writer.close()
+                if os.path.exists(ckpt):
+                    os.remove(ckpt)  # inner-loop checkpoints are throwaway
 
-            if os.path.exists(ckpt):
-                os.remove(ckpt)
+            inner_scores.append(score)
+
+            # Prune on the running mean: a config that is clearly behind after
+            # 1-2 of the 4 inner folds is abandoned instead of burning the rest.
+            trial.report(float(np.mean(inner_scores)), step=inner_i)
+            if trial.should_prune():
+                print(
+                    f'    pruned after inner fold {inner_i} '
+                    f'(mean so far {np.mean(inner_scores):.4f})',
+                    flush=True,
+                )
+                raise optuna.TrialPruned()
     finally:
         args.epochs = orig_epochs  # always restore so retraining uses full epoch budget
 
@@ -339,9 +407,9 @@ def train(args, train_partitions=[0,1,2], valid_partitions=[3], test_partitions=
     if getattr(args, 'num_cpu_threads', None):
         torch.set_num_threads(args.num_cpu_threads)
 
-    device = (torch.device('cuda') if torch.cuda.is_available()
-              else torch.device('mps') if torch.backends.mps.is_available()
-              else torch.device('cpu'))
+    # NOTE: use the module-level `device`; run_dataloader moves its batches with
+    # that global, so a local re-detection here would silently diverge from it.
+    print(f'Device: {device}', flush=True)
 
     train_loader, valid_loader, test_loader = get_dataloaders(
         args, train_partitions, valid_partitions, test_partitions)
@@ -354,7 +422,8 @@ def train(args, train_partitions=[0,1,2], valid_partitions=[3], test_partitions=
     checkpoint = os.path.join(args.out_dir, 'model.pt')
 
     best_val_metrics, _ = run_training_for_params(
-        args, model, train_loader, valid_loader, optimizer, writer, checkpoint)
+        args, model, train_loader, valid_loader, optimizer, writer, checkpoint,
+        use_focal=getattr(args, 'use_focal', False))
 
     model.load_state_dict(torch.load(checkpoint, map_location=device))
     model.eval()
@@ -391,6 +460,17 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         torch.set_num_threads(args.num_cpu_threads)
         print(f'PyTorch CPU threads: {args.num_cpu_threads}', flush=True)
 
+    torch.manual_seed(args.seed)
+    print(f'Device: {device}', flush=True)
+    if device.type == 'cuda':
+        print(f'GPU: {torch.cuda.get_device_name(0)}', flush=True)
+    else:
+        print(
+            'WARNING: no CUDA device visible — this search will run on CPU and take '
+            'far longer than intended.',
+            flush=True,
+        )
+
     optuna_epochs = args.optuna_epochs if args.optuna_epochs else args.epochs
 
     all_partitions = list(range(5))
@@ -405,12 +485,23 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         outer_train_partitions = [p for p in all_partitions if p != outer_fold]
 
         # ---- Inner loop: Optuna ----
-        study = optuna.create_study(direction='maximize')
+        # Seeded sampler so the search is reproducible; offset by outer_fold so the
+        # five folds explore different trial sequences instead of the same one.
+        # Pruning is opt-in (--prune): the default NopPruner runs every trial to
+        # completion, which is the plain exhaustive search.
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=args.seed + outer_fold),
+            pruner=(optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1)
+                    if args.prune else optuna.pruners.NopPruner()),
+        )
 
         def _objective_with_log(trial):
             print(f'\n--- Outer {outer_fold} | Trial {trial.number+1}/{args.n_trials} ---', flush=True)
             score = objective(trial, args, outer_train_partitions, outer_fold, optuna_epochs)
-            print(f'    Trial {trial.number+1} score: {score:.4f}', flush=True)
+            # trial.params is only populated once objective() has run its suggest_*
+            # calls, so it is logged here rather than before.
+            print(f'    Trial {trial.number+1} score: {score:.4f}  params: {trial.params}', flush=True)
             return score
 
         study.optimize(
@@ -418,15 +509,35 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
             n_trials=args.n_trials,
         )
         best_params = study.best_params
+        n_pruned = len([t for t in study.trials
+                        if t.state == optuna.trial.TrialState.PRUNED])
+        print(
+            f'Outer fold {outer_fold}: {len(study.trials)} trials '
+            f'({n_pruned} pruned). Best inner-CV F1 = {study.best_value:.4f}',
+            flush=True,
+        )
         print(f'Best hyperparameters (outer fold {outer_fold}):', best_params)
+        # Every tunable is a real suggest_* call, so best_params is complete —
+        # no manual patch-ups needed here.
         for k, v in best_params.items():
             setattr(args, k, v)
-        args.conv_dropout = args.dropout  # conv_dropout is tied to dropout but not in best_params
 
         json.dump(
             best_params,
             open(os.path.join(args.out_dir, f'best_params_outer{outer_fold}.json'), 'w'),
             indent=2,
+        )
+        # Full effective config, so the retrained models can be reproduced from
+        # one file without having to know which defaults were in play.
+        json.dump(
+            {**vars(args), 'best_inner_cv_f1': study.best_value,
+             'n_trials_run': len(study.trials), 'n_trials_pruned': n_pruned},
+            open(os.path.join(args.out_dir, f'effective_config_outer{outer_fold}.json'), 'w'),
+            indent=2,
+        )
+        # Per-trial history, for the supervisor to inspect the search itself.
+        study.trials_dataframe().to_csv(
+            os.path.join(args.out_dir, f'optuna_trials_outer{outer_fold}.csv'), index=False,
         )
 
         # ---- Retrain 4 inner-fold models with best hyperparameters ----
@@ -453,6 +564,7 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
 
             _, _ = run_training_for_params(
                 args, model, train_loader, valid_loader, optimizer, writer, ckpt_path,
+                use_focal=args.use_focal,
             )
             writer.close()
 
@@ -500,12 +612,26 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         )
     else:
         f1_scores = [m['f1 propeptides'] for m in all_outer_results]
+        summary = {
+            'outer_fold': args.outer_fold,
+            'mean_f1_propeptides': float(np.mean(f1_scores)),
+            'std_f1_propeptides':  float(np.std(f1_scores)),
+            'n_models': len(all_outer_results),
+            'per_model': all_outer_results,
+        }
+        # Persist it: train_nested_cv's return value is discarded by __main__, so
+        # without this file a per-fold run leaves its metrics only in the log.
+        json.dump(
+            summary,
+            open(os.path.join(args.out_dir, f'fold_summary_outer{args.outer_fold}.json'), 'w'),
+            indent=2,
+        )
         print(
             f'\nOuter fold {args.outer_fold} complete. '
-            f'Mean test F1 = {np.mean(f1_scores):.4f}. '
-            f'Run evaluation/measure_performance.py once all 5 folds finish.'
+            f'Mean test F1 = {np.mean(f1_scores):.4f} '
+            f'(written to fold_summary_outer{args.outer_fold}.json). '
+            f'Run summarize_optuna.py once all 5 folds finish.'
         )
-        summary = {'outer_fold': args.outer_fold, 'per_model': all_outer_results}
     return summary
 
 
@@ -544,8 +670,17 @@ def parse_arguments() -> argparse.Namespace:
                         'Use 35 to cover the typical phase-transition zone (~22-30 epochs) '
                         'while saving ~30%% vs full 50 epochs. Retraining always uses --epochs.')
 
-    p.add_argument('--use_focal', default=True, action=argparse.BooleanOptionalAction,
-                   help='Add focal loss on emissions to combat class imbalance (--no-use-focal to disable).')
+    p.add_argument('--use_focal', default=False, action=argparse.BooleanOptionalAction,
+                   help='Add an auxiliary focal loss on the emissions to combat class '
+                        'imbalance (--use-focal to enable). Default off: this is the '
+                        'faithful loop, and the reported ESM3/ESM-2 propeptide numbers '
+                        'were produced without it.')
+    p.add_argument('--seed', type=int, default=42,
+                   help='Seed for the Optuna TPE sampler and torch, so a search is reproducible.')
+    p.add_argument('--prune', action='store_true',
+                   help='Opt in to Optuna median pruning: abandon a trial once its '
+                        'running inner-fold mean is clearly behind. Saves GPU time but '
+                        'makes the search non-exhaustive. Off by default.')
 
     # These are the starting defaults; Optuna will override them during search.
     p.add_argument('--lr', type=float, default=1e-4)

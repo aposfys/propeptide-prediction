@@ -23,3 +23,12 @@ baseline_*/
 *.txt
 *.pickle
 train_run/
+logs/
+
+# --- Results are the deliverable: re-include them ---
+# The blanket *.json / *.csv rules above otherwise swallow every metrics and
+# hyperparameter file, so a finished run would look empty to git and the
+# supervisor would get code with no numbers attached. Model weights (*.pt) stay
+# ignored — they are large and reproducible from the configs below.
+!results/**/*.json
+!results/**/*.csv

@@ -8,7 +8,7 @@
 #       --data_file data/labeled_sequences.csv \
 #       --partitioning_file data/graphpart_assignments.csv \
 #       --embedding_dim 1280 \
-#       --label_type multistate_with_propeptides \
+#       (no --label_type: this branch is propeptide-only by construction) \
 #       --out_dir train_run_cv \
 #       --epochs 50 --patience 10
 #
