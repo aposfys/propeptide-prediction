@@ -27,8 +27,53 @@ from .utils.manuscript_metrics import compute_all_metrics
 
 import argparse
 
+# This branch is GPU-only. Device selection still falls back so that the module
+# can be imported, --help works, and preflight can run on a CPU login node — but
+# any actual training run is gated by require_cuda() below.
 device = torch.device('cuda') if torch.cuda.is_available() else (torch.device('mps') if torch.backends.mps.is_available() else torch.device('cpu'))
 global_step = 0
+
+
+def require_cuda(args: argparse.Namespace) -> None:
+    '''Abort unless a CUDA GPU is present.
+
+    The hyperparameter search on this branch is a GPU workload: one trial is 4
+    inner-fold trainings, and a full search is hundreds of them. On CPU the same
+    run takes orders of magnitude longer, so silently falling back produces a job
+    that looks alive for days and never finishes. Failing here, immediately, is
+    the useful behaviour.
+
+    --allow_cpu exists only to smoke-test plumbing on a login node. It is not for
+    producing results.
+    '''
+    if device.type == 'cuda':
+        print(f'Device: cuda — {torch.cuda.get_device_name(0)} '
+              f'({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)',
+              flush=True)
+        return
+
+    if getattr(args, 'allow_cpu', False):
+        print(
+            f'WARNING: --allow_cpu set, running on {device.type}. This is for '
+            'smoke-testing plumbing only — do NOT report results from this run.',
+            flush=True,
+        )
+        return
+
+    raise SystemExit(
+        f'ERROR: no CUDA GPU available (torch sees "{device.type}").\n'
+        '\n'
+        'This branch is GPU-only — a full search is hundreds of trainings and is\n'
+        'not viable on CPU. Run it on a GPU node.\n'
+        '\n'
+        'If a GPU should be visible here, check:\n'
+        '  python -c "import torch; print(torch.__version__, torch.version.cuda)"\n'
+        '  nvidia-smi\n'
+        'A CPU-only torch build reports cuda=None and needs reinstalling.\n'
+        '\n'
+        'To smoke-test the plumbing on a CPU node anyway, pass --allow_cpu\n'
+        '(results from such a run are not usable).'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +498,7 @@ def train(args, train_partitions=[0,1,2], valid_partitions=[3], test_partitions=
 
     # NOTE: use the module-level `device`; run_dataloader moves its batches with
     # that global, so a local re-detection here would silently diverge from it.
-    print(f'Device: {device}', flush=True)
+    require_cuda(args)
 
     train_loader, valid_loader, test_loader = get_dataloaders(
         args, train_partitions, valid_partitions, test_partitions)
@@ -504,16 +549,8 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         torch.set_num_threads(args.num_cpu_threads)
         print(f'PyTorch CPU threads: {args.num_cpu_threads}', flush=True)
 
+    require_cuda(args)
     torch.manual_seed(args.seed)
-    print(f'Device: {device}', flush=True)
-    if device.type == 'cuda':
-        print(f'GPU: {torch.cuda.get_device_name(0)}', flush=True)
-    else:
-        print(
-            f'WARNING: no CUDA GPU visible — running on {device.type}. This works, '
-            'but a full search will take far longer than on a GPU.',
-            flush=True,
-        )
 
     # Record the space in the log: 'wide' results must never be reported next to
     # the ESM-2 T4 number as though they were comparable.
@@ -745,6 +782,10 @@ def parse_arguments() -> argparse.Namespace:
                    help='Opt in to Optuna median pruning: abandon a trial once its '
                         'running inner-fold mean is clearly behind. Saves GPU time but '
                         'makes the search non-exhaustive. Off by default.')
+    p.add_argument('--allow_cpu', action='store_true',
+                   help='Override the GPU requirement. For smoke-testing plumbing on a '
+                        'CPU node only — a real search is not viable on CPU, and results '
+                        'from such a run must not be reported.')
 
     # These are the starting defaults; Optuna will override them during search.
     p.add_argument('--lr', type=float, default=1e-4)

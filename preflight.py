@@ -1,5 +1,6 @@
 '''
-Validate the setup before starting a long run.
+Validate the setup before starting a long run. This branch is GPU-only, so a
+machine without a CUDA GPU fails this check.
 
 Written for the hand-off case: the code is staged on one machine and the search
 is run on another, by someone who did not set it up. Everything checked here
@@ -11,6 +12,10 @@ Usage:
     python preflight.py --embeddings_dir ... --embedding_dim 1536
 
 Exits 0 if the run can start, 1 otherwise. run_optuna_gpu.sh calls this first.
+
+Run it on the GPU machine — running it on a CPU login node will (correctly)
+report the missing GPU as a failure, so use it there only to check the data and
+embeddings, reading past that one line.
 '''
 import argparse
 import os
@@ -52,8 +57,12 @@ def main():
             ok(f'CUDA GPU: {props.name} ({props.total_memory / 1e9:.0f} GB), '
                f'cuda {torch.version.cuda}')
         else:
-            warn('no CUDA GPU visible — the run works on CPU but will be far slower. '
-                 'If this machine has a GPU, check the torch build and drivers.')
+            # This branch is GPU-only, so no GPU is a failure, not a warning.
+            bad(f'no CUDA GPU visible (torch.version.cuda={torch.version.cuda}). '
+                'This branch is GPU-only — a full search is hundreds of trainings '
+                'and is not viable on CPU. Run on a GPU node; if one should be '
+                'visible here, check `nvidia-smi` and whether this is a CPU-only '
+                'torch build (cuda=None).')
     except ImportError as e:
         bad(f'torch not importable: {e}')
         print()
