@@ -49,8 +49,9 @@ def generate_esm_embeddings(fasta_file, esm_embeddings_dir):
     print(f'  {len(dataset)} unique sequences to embed')
 
     with torch.no_grad():
-        if torch.cuda.is_available():
-            esm_model = esm_model.cuda()
+        device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        esm_model = esm_model.to(device)
+        print(f'Embedding on {device}')
 
         print('Starting to generate embeddings')
 
@@ -62,8 +63,10 @@ def generate_esm_embeddings(fasta_file, esm_embeddings_dir):
             protein = ESMProtein(sequence=seq)
             encoded = esm_model.encode(protein)
 
+            # .to(device) is required: the tokens come back on CPU, and feeding
+            # them to a CUDA model raises a device-mismatch RuntimeError.
             out = esm_model(
-                sequence_tokens=encoded.sequence.unsqueeze(0),
+                sequence_tokens=encoded.sequence.unsqueeze(0).to(device),
             )
 
             seq_embedding = out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS
