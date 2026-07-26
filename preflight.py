@@ -152,8 +152,8 @@ def main():
         print('=== Resources ===')
         ok(f'embedding cache will hold ~{gb:.1f} GB in host RAM at full dataset '
            f'({gb * 0.8:.1f} GB for the 4/5 partitions one outer fold uses)')
-        warn('one process per GPU only — do not use run_parallel.sh here, it starts '
-             '5 processes and each keeps its own copy of that cache')
+        warn('one training process per GPU — each process keeps its own copy of that '
+             'cache, so do not launch several folds concurrently on one device')
 
     _report()
 
