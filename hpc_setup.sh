@@ -8,7 +8,7 @@
 #   bash hpc_setup.sh [--repo-dir DIR] [--emb-dir DIR] [--fasta FILE] [--skip-esm2] [--skip-esm3] [--skip-prost5]
 #
 # Defaults:
-#   --repo-dir  ~/DeepPeptide_esm3
+#   --repo-dir  ~/deeppeptide-esm3
 #   --emb-dir   ~/embeddings          (shared across branches)
 #   --fasta     <repo>/data/protein_sequences.fasta
 #
@@ -18,7 +18,7 @@ set -euo pipefail
 
 # ── defaults ──────────────────────────────────────────────────────────────────
 REPO_URL="https://github.com/aposfys/DeepPeptide-ESM3.git"
-REPO_DIR="${HOME}/DeepPeptide_esm3"
+REPO_DIR="${HOME}/deeppeptide-esm3"
 EMB_DIR="${HOME}/embeddings"
 FASTA=""          # resolved from repo after clone/pull
 SKIP_ESM2=false
