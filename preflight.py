@@ -80,13 +80,19 @@ def main():
 
     print()
     print('=== Data ===')
+    data_missing = False
     for f in (args.data_file, args.partitioning_file):
         if os.path.isfile(f):
             ok(f'{f} ({os.path.getsize(f) / 1e6:.1f} MB)')
         else:
             bad(f'{f} not found — run from the repository root')
+            data_missing = True
 
-    if problems:
+    # Bail only if the data files themselves are unreadable, since the pandas
+    # read below would crash. Any *other* problem recorded so far (a missing GPU,
+    # most likely) must NOT stop us here — checking the embeddings on a CPU login
+    # node before handing the job to a GPU machine is a main use of this script.
+    if data_missing:
         _report()
 
     data = pd.read_csv(args.data_file, index_col='protein_id')
