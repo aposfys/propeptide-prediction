@@ -13,9 +13,10 @@ This branch runs the **hyperparameter search** for that model.
 Four steps. Run everything from the repository root.
 
 ```bash
-# 1. environment
+# 1. environment  (needs a CUDA torch build — see requirements.txt)
 conda create -n deeppeptide python=3.10 -y && conda activate deeppeptide
 pip install -r requirements.txt
+python -c "import torch; print(torch.__version__, torch.version.cuda)"  # cuda must NOT be None
 
 # 2. check the setup before spending hours on it
 python preflight.py --embeddings_dir /path/to/embeddings/esm3

@@ -96,7 +96,9 @@ if conda env list | grep -q "^${CONDA_ENV} "; then
 else
     log "Creating conda environment '${CONDA_ENV}'..."
     conda create -n "$CONDA_ENV" python=3.10 -y
-    run_in_env pip install -r "${REPO_DIR}/requirements.txt"
+    # This script generates embeddings, so it needs `esm` too — that lives in
+    # requirements-embeddings.txt, which pulls in requirements.txt as well.
+    run_in_env pip install -r "${REPO_DIR}/requirements-embeddings.txt"
     log "Environment ready."
 fi
 
