@@ -1,0 +1,9 @@
+# Dependencies for GENERATING ESM3 embeddings (src/utils/make_embeddings.py).
+# You only need this if you do not already have the precomputed .pt files —
+# training and the hyperparameter search do not use it.
+#
+# esm3_sm_open_v1 is a gated model on Hugging Face, so authenticate first:
+#     huggingface-cli login
+#
+-r requirements.txt
+esm>=3.0.0

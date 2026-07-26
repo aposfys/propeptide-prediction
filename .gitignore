@@ -25,6 +25,11 @@ baseline_*/
 train_run/
 logs/
 
+# --- Dependency manifests are source, not logs ---
+# The blanket *.txt above otherwise silently ignores them, so a new
+# requirements file looks committed but never is.
+!requirements*.txt
+
 # --- Results are the deliverable: re-include them ---
 # The blanket *.json / *.csv rules above otherwise swallow every metrics and
 # hyperparameter file, so a finished run would look empty to git and the

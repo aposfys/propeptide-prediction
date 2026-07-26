@@ -1,6 +1,26 @@
-esm>=3.0.0
-optuna>=3.0.0
-pandas>=1.5.0
-tensorboard>=2.8.0
+# Core dependencies — everything needed to train and to run the Optuna search.
+#
+# torch: THIS BRANCH IS GPU-ONLY, so you need a CUDA build. A plain
+# `pip install torch` can resolve to a CPU-only wheel depending on the index and
+# platform (our CPU node ended up with 2.2.0+cpu), and the run will refuse to
+# start. Verify after installing:
+#
+#     python -c "import torch; print(torch.__version__, torch.version.cuda)"
+#
+# If that prints cuda=None, reinstall from the CUDA index, matching the driver
+# on the machine, e.g. for CUDA 12.1:
+#
+#     pip install --index-url https://download.pytorch.org/whl/cu121 torch
+#
 torch>=2.0.0
+numpy>=1.21.0
+pandas>=1.5.0
+optuna>=3.0.0
+tensorboard>=2.8.0
 tqdm>=4.64.0
+
+# NOTE: `esm` is deliberately NOT here. It is only needed to GENERATE ESM3
+# embeddings (src/utils/make_embeddings.py) — training reads precomputed .pt
+# files and never loads ESM3, whose weights are frozen. If you do need to
+# generate embeddings, install requirements-embeddings.txt instead; note that
+# esm3_sm_open_v1 is gated on Hugging Face and needs `huggingface-cli login`.
