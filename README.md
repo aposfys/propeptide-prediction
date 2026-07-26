@@ -96,10 +96,11 @@ models are scored on the held-out test partition at ±3 residue tolerance.
 | `--space` | `table_s1` | search space; see [OPTUNA_GPU.md](OPTUNA_GPU.md) |
 
 Running on one GPU, the folds go sequentially — that is what `run_optuna_gpu.sh`
-does. Do **not** use `run_parallel.sh`, which starts all 5 at once: it was written
-for a 48-core CPU node, and on a single GPU it means five copies of the model
-competing for VRAM plus ~50 GB of host RAM, since the embedding cache is
-per-process. With several GPUs, run one fold per GPU:
+does, and it is the only launcher on this branch. (The CPU branches carry
+`run_parallel.sh` / `run_simple_cv.sh`, which start all 5 folds at once. Those are
+deliberately absent here: on a single GPU that means five copies of the model
+competing for VRAM plus ~50 GB of host RAM, because the embedding cache is
+per-process.) With several GPUs, run one fold per GPU:
 
 ```bash
 for f in 0 1 2 3 4; do
