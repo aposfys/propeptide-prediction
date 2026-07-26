@@ -37,3 +37,7 @@ logs/
 # ignored — they are large and reproducible from the configs below.
 !results/**/*.json
 !results/**/*.csv
+
+# TensorBoard event files are regenerable and can be large; the re-inclusions
+# above would otherwise let them into results/ commits.
+events.out.tfevents*
