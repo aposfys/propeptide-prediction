@@ -1,20 +1,38 @@
 '''
 Simple 5-fold CV — one job per fold, fixed hyperparameters, no Optuna.
-Matches the original DeepPeptide paper training protocol.
+
+Matches the original DeepPeptide *code* (fteufel/DeepPeptide, run.py), which is
+just `train(parse_arguments())`: the training loop, with hyperparameters read
+from the command line. Upstream ships no hyperparameter-search code at all.
+
+This is NOT the paper's protocol. That is a 5-fold nested CV with an Optuna
+search over Table S1's space in the inner loop, reimplemented from the paper's
+description in objective(), src/train_loop_crf.py — run it via run_optuna_gpu.sh.
+
+Use this script for smoke tests, and for reproducing a fixed configuration
+without re-running a search: Table S2 of btad616 publishes the per-fold winners
+T0..T4 that the authors' own search found.
 
 Works on every branch (uses train() which is present everywhere).
 Gracefully handles branches where parse_arguments() lacks some flags.
 
-Usage (one fold):
+Table S2 (btad616) — hyperparameters found by the paper's search:
+    fold   lr       batch  dropout  conv_dropout  kernel  filters  hidden
+    T0     0.0033   90     0.2349   0.1041        5       96       48
+    T1     0.0003   70     0.3255   0.3928        5       80       32
+    T2     0.0010   50     0.1437   0.4085        3       80       32
+    T3     0.0033   60     0.4781   0.5082        5       96       32
+    T4     0.0055   20     0.6902   0.2672        5       48       48
+
+Usage (fold 0, with Table S2's T0 row):
     python run_fold.py --test_fold 0 \
         --embeddings_dir ~/embeddings/esm2 \
         --data_file data/labeled_sequences.csv \
         --partitioning_file data/graphpart_assignments.csv \
         --embedding_dim 1280 \
-        --out_dir results/main_esm2
-
-Run all 5 in parallel via:
-    THREADS=8 bash run_simple_cv.sh --embeddings_dir ... --out_dir ...
+        --lr 0.0033 --batch_size 90 --dropout 0.2349 --conv_dropout 0.1041 \
+        --kernel_size 5 --num_filters 96 --hidden_size 48 \
+        --out_dir results/s2_esm2
 '''
 import argparse
 import json
