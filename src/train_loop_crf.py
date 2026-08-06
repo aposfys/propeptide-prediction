@@ -612,12 +612,41 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
         # five folds explore different trial sequences instead of the same one.
         # Pruning is opt-in (--prune): the default NopPruner runs every trial to
         # completion, which is the plain exhaustive search.
+        #
+        # The study is persisted to SQLite so a crash or preemption does not throw
+        # away the trials already paid for — a full search is hundreds of trainings
+        # over days. Re-running the same command resumes where it stopped.
+        #
+        # The search space is in the filename on purpose: trials are only
+        # comparable within one space, and resuming a table_s1 study under --space
+        # wide would silently mix two different searches into one best_params.
+        storage_path = os.path.abspath(
+            os.path.join(args.out_dir, f'optuna_{args.space}_outer{outer_fold}.db')
+        )
         study = optuna.create_study(
             direction='maximize',
+            study_name=f'{args.space}_outer{outer_fold}',
+            storage=f'sqlite:///{storage_path}',
+            load_if_exists=True,
             sampler=optuna.samplers.TPESampler(seed=args.seed + outer_fold),
             pruner=(optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1)
                     if args.prune else optuna.pruners.NopPruner()),
         )
+
+        # optimize(n_trials=N) runs N *more* trials, so on a resume the budget has
+        # to be reduced by what the store already holds or the search overshoots.
+        # Only finished trials count: a trial left RUNNING by a crash produced no
+        # value, and FAILed ones are worth re-drawing.
+        done = len([t for t in study.trials
+                    if t.state in (optuna.trial.TrialState.COMPLETE,
+                                   optuna.trial.TrialState.PRUNED)])
+        remaining = max(0, args.n_trials - done)
+        if done:
+            print(
+                f'Resuming study {study.study_name} from {storage_path}: '
+                f'{done} trials already stored, running {remaining} more.',
+                flush=True,
+            )
 
         def _objective_with_log(trial):
             print(f'\n--- Outer {outer_fold} | Trial {trial.number+1}/{args.n_trials} ---', flush=True)
@@ -627,10 +656,11 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
             print(f'    Trial {trial.number+1} score: {score:.4f}  params: {trial.params}', flush=True)
             return score
 
-        study.optimize(
-            _objective_with_log,
-            n_trials=args.n_trials,
-        )
+        if remaining:
+            study.optimize(
+                _objective_with_log,
+                n_trials=remaining,
+            )
         best_params = study.best_params
         n_pruned = len([t for t in study.trials
                         if t.state == optuna.trial.TrialState.PRUNED])
