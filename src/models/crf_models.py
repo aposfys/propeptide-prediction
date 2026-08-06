@@ -119,13 +119,20 @@ class CRFBaseModel(nn.Module):
 
 
     def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False,
-                top_k: int = 1, use_focal: bool = False):
+                top_k: int = 1, use_focal: bool = False, skip_decode: bool = False):
 
         features = self.feature_extractor(embeddings, mask)
         raw_emissions = self.features_to_emissions(features)   # (batch, L, 2)
         emissions = self._repeat_emissions(raw_emissions)      # (batch, L, num_states)
 
-        viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask=mask.byte(), top_k=top_k)
+        # Viterbi decode contributes nothing to the loss, but its backtrace is a
+        # per-sample, per-timestep Python loop of .item() calls — each one a
+        # blocking CUDA sync. Training discards the paths, so decoding there costs
+        # tens of thousands of syncs per batch for a result nobody reads.
+        if skip_decode:
+            viterbi_paths, path_probs = [], []
+        else:
+            viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask=mask.byte(), top_k=top_k)
 
         probs = (self.crf.compute_marginal_probabilities(emissions, mask.byte())
                  if not skip_marginals else torch.softmax(emissions, dim=-1))
@@ -270,12 +277,16 @@ class SimpleLSTMCNNCRF(CRFBaseModel):
 
 
     # redefine forward because no emission repeating.
-    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False, use_focal: bool = False):
+    def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False,
+                use_focal: bool = False, skip_decode: bool = False):
         # use_focal accepted for API compatibility with CRFBaseModel; not applied here (simple 2-state CRF)
         features = self.feature_extractor(embeddings, mask)
         emissions = self.features_to_emissions(features)
-        
-        viterbi_paths, probs = self.crf.decode(emissions=emissions, mask = mask.byte())
+
+        if skip_decode:
+            viterbi_paths = []
+        else:
+            viterbi_paths, _ = self.crf.decode(emissions=emissions, mask = mask.byte())
 
         #pad the viterbi paths
         # max_pad_len = max([len(x) for x in viterbi_paths])

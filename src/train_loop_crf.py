@@ -113,6 +113,12 @@ def get_dataloaders(
     # pin_memory speeds up the host->GPU copy of the padded embedding batches,
     # which are the largest tensors moved each step (1536 x L_max x batch).
     pin = device.type == 'cuda'
+    # INVARIANT: the eval loaders must stay shuffle=False. compute_all_metrics is
+    # handed predictions in *loader* order but names/data in *dataset* order, and
+    # pairs them positionally. Equal lengths make any permutation invisible — no
+    # exception, just silently mismatched metrics. Introducing shuffling, length
+    # bucketing, or a custom sampler on valid/test requires inverting the
+    # permutation first and asserting the names line up.
     train_loader = DataLoader(
         train_set, batch_size=args.batch_size, shuffle=True,
         collate_fn=train_set.collate_fn, num_workers=nw, pin_memory=pin,
@@ -191,8 +197,18 @@ def run_dataloader(
     writer: SummaryWriter,
     do_train: bool = True,
     use_focal: bool = False,
+    collect_probs: bool = True,
 ) -> Tuple[float, List[np.ndarray], List[List[int]], List[np.ndarray], List[np.ndarray]]:
-    '''Run one epoch; collect per-sequence Viterbi paths, marginals, and labels.'''
+    '''Run one epoch; collect per-sequence Viterbi paths, marginals, and labels.
+
+    With do_train=True only the mean loss is populated — the four collection
+    lists come back empty, because every caller discards them there and
+    producing them costs a Viterbi decode plus a host copy per batch.
+
+    collect_probs=False additionally drops the marginals and labels in eval.
+    compute_all_metrics scores the Viterbi paths alone, so the per-epoch
+    validation pass needs neither; only the final test pass does, to pickle them.
+    '''
     global global_step
 
     true_peptides = []
@@ -213,23 +229,34 @@ def run_dataloader(
             model.zero_grad()
             pos_probs, pos_preds, loss = model(
                 embeddings, mask, label, skip_marginals=True, use_focal=use_focal,
+                skip_decode=True,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
             optimizer.step()
-            writer.add_scalar('Train/loss', loss.item(), global_step=global_step)
+            loss_value = loss.item()
+            writer.add_scalar('Train/loss', loss_value, global_step=global_step)
             global_step += 1
         else:
             with torch.no_grad():
                 pos_probs, pos_preds, loss = model(
                     embeddings, mask, label, skip_marginals=True, use_focal=False,
                 )
+            loss_value = loss.item()
 
-        true_peptides.extend(propeptides)
-        probs.extend([pos_probs[i].detach().cpu().numpy() for i in range(pos_probs.shape[0])])
-        labels.extend([label[i].detach().cpu().numpy() for i in range(label.shape[0])])
-        preds.extend(pos_preds)
-        epoch_loss.append(loss.item())
+        # Only the loss is read back during training — callers discard the other
+        # four return values — so the per-sample host copies are skipped there.
+        # In eval, each tensor crosses to the host once per batch rather than
+        # once per sequence; the per-sample split then happens on CPU.
+        if not do_train:
+            true_peptides.extend(propeptides)
+            preds.extend(pos_preds)
+            if collect_probs:
+                probs_np = pos_probs.detach().cpu().numpy()
+                labels_np = label.detach().cpu().numpy()
+                probs.extend([probs_np[i] for i in range(probs_np.shape[0])])
+                labels.extend([labels_np[i] for i in range(labels_np.shape[0])])
+        epoch_loss.append(loss_value)
 
     return sum(epoch_loss) / len(epoch_loss), probs, preds, true_peptides, labels
 
@@ -270,6 +297,7 @@ def run_training_for_params(
 
         _, valid_probs, valid_preds, _, valid_labels = run_dataloader(
             valid_loader, model, optimizer, writer, do_train=False,
+            collect_probs=False,
         )
         valid_metrics = compute_all_metrics(
             valid_probs, valid_preds, valid_labels,
