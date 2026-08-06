@@ -41,3 +41,8 @@ logs/
 # TensorBoard event files are regenerable and can be large; the re-inclusions
 # above would otherwise let them into results/ commits.
 events.out.tfevents*
+
+# Optuna study stores are resume state, not the deliverable: the trial history
+# is already committed as results/**/optuna_trials_outer*.csv. No ignore rule
+# above matches *.db, so without this they would land in results/ commits.
+*.db
