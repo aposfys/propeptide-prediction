@@ -52,6 +52,32 @@ def main():
     try:
         import torch
         ok(f'torch {torch.__version__}')
+
+        # expandable_segments is what keeps this run out of the allocator's
+        # flush-and-retry path, which costs ~30 s each time it fires. It is a
+        # silent no-op on both counts below — an old torch ignores the key, and
+        # an unset variable is simply the default allocator — so neither failure
+        # announces itself in the log. Warn here or not at all.
+        try:
+            major, minor = (int(x) for x in torch.__version__.split('.')[:2])
+            if (major, minor) < (2, 1):
+                warn(f'torch {torch.__version__} predates expandable_segments '
+                     '(added in 2.1). PYTORCH_CUDA_ALLOC_CONF will be ignored and '
+                     'fragmentation stalls will return. Upgrade if the log shows '
+                     'repeated allocator warnings.')
+        except ValueError:
+            pass
+
+        alloc_conf = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
+        if 'expandable_segments' in alloc_conf:
+            ok(f'PYTORCH_CUDA_ALLOC_CONF={alloc_conf}')
+        else:
+            warn('PYTORCH_CUDA_ALLOC_CONF does not set expandable_segments. The '
+                 'run works either way, but padded batches of varying length '
+                 'fragment the caching allocator, and each recovery stalls the '
+                 'GPU for ~30 s. Set it before starting:  '
+                 'export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True')
+
         if torch.cuda.is_available():
             props = torch.cuda.get_device_properties(0)
             ok(f'CUDA GPU: {props.name} ({props.total_memory / 1e9:.0f} GB), '
