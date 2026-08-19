@@ -197,7 +197,8 @@ class CRF(nn.Module):
                init_state_vector: Optional[torch.LongTensor] = None,
                forced_steps: int = 2,
                no_mask_label: int = 0,
-               top_k: int = 1) -> Tuple[List[List[int]], List[float]]:
+               top_k: int = 1,
+               return_path_scores: bool = True) -> Tuple[List[List[int]], List[float]]:
         """Find the most likely tag sequence using Viterbi algorithm.
         Args:
             emissions (`~torch.Tensor`): Emission score tensor of size
@@ -226,7 +227,8 @@ class CRF(nn.Module):
             paths, likelihoods = self._topk_viterbi_decode(emissions, mask, top_k=top_k)
             return paths, likelihoods
         else:
-            paths, likelihoods = self._viterbi_decode(emissions, mask)
+            paths, likelihoods = self._viterbi_decode(
+                emissions, mask, return_path_scores=return_path_scores)
 
         return paths, likelihoods
 
@@ -392,7 +394,8 @@ class CRF(nn.Module):
         return torch.logsumexp(score, dim=1)
 
     def _viterbi_decode(self, emissions: torch.FloatTensor,
-                        mask: torch.ByteTensor) -> List[List[int]]:
+                        mask: torch.ByteTensor,
+                        return_path_scores: bool = True) -> List[List[int]]:
         # emissions: (seq_length, batch_size, num_tags) logits
         # mask: (seq_length, batch_size)
         assert emissions.dim() == 3 and mask.dim() == 2
@@ -458,22 +461,24 @@ class CRF(nn.Module):
 
         # shape: (batch_size,)
         seq_ends = mask.long().sum(dim=0) - 1
+
+        # Backtrace on the host. The recurrence above is inherently sequential and
+        # stays on the device, but the backtrace only reads already-computed
+        # indices -- and doing it with a .item() per timestep per sequence issues
+        # batch_size x seq_length blocking device syncs per batch (up to ~200k at
+        # batch 100, L 2000), which dominates eval on a GPU. Moving `history` and
+        # `score` across once and walking them in Python costs two transfers total
+        # and produces the identical paths.
+        best_scores, best_last_tags = score.max(dim=1)          # (batch_size,)
+        history_h = torch.stack(history).cpu() if history else None
+        last_tags_h = best_last_tags.cpu().tolist()
+        seq_ends_h = seq_ends.cpu().tolist()
+
         best_tags_list = []
-        best_score_list = []
-
         for idx in range(batch_size):
-            # Find the tag which maximizes the score at the last timestep; this is our best tag
-            # for the last timestep
-            best_score, best_last_tag = score[idx].max(dim=0)
-            best_tags = [best_last_tag.item()]
-            best_score_list.append(best_score)
-            # We trace back where the best last tag comes from, append that to our best tag
-            # sequence, and trace it back again, and so on
-            for hist in reversed(history[:seq_ends[idx]]):
-                best_last_tag = hist[idx][best_tags[-1]]
-                best_tags.append(best_last_tag.item())
-
-            # Reverse the order because we start from the last timestep
+            best_tags = [last_tags_h[idx]]
+            for hist in reversed(range(seq_ends_h[idx])):
+                best_tags.append(int(history_h[hist, idx, best_tags[-1]]))
             best_tags.reverse()
             best_tags_list.append(best_tags)
 
@@ -482,11 +487,15 @@ class CRF(nn.Module):
             self.end_transitions.data = end_transitions_temp
             self.transitions.data = transitions_temp
 
-        
+        # The path scores need a full extra pass of the forward algorithm, which
+        # is as expensive as the loss's own normalizer. Every caller that passes
+        # `targets` throws them away (crf_models.forward returns the loss instead),
+        # so they are only computed when actually asked for.
+        if not return_path_scores:
+            return best_tags_list, []
+
         log_denominator = self._compute_log_normalizer(emissions, mask) # log norm normalization constant (batch_size,)
-        llhs = []
-        for idx, s in enumerate(best_score_list):
-            llhs.append((s-log_denominator[idx]).detach().cpu().numpy().item())
+        llhs = (best_scores - log_denominator).detach().cpu().tolist()
 
         return best_tags_list, llhs
 
