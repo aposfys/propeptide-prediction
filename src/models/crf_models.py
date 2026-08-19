@@ -132,7 +132,14 @@ class CRFBaseModel(nn.Module):
         if skip_decode:
             viterbi_paths, path_probs = [], []
         else:
-            viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask=mask.byte(), top_k=top_k)
+            # The path scores cost a full extra forward-algorithm pass, and this
+            # method drops them whenever `targets` is given (it returns the loss
+            # instead) -- which is every training and validation call. Only ask
+            # for them on the prediction path, where they are actually returned.
+            viterbi_paths, path_probs = self.crf.decode(
+                emissions=emissions, mask=mask.byte(), top_k=top_k,
+                return_path_scores=targets is None,
+            )
 
         probs = (self.crf.compute_marginal_probabilities(emissions, mask.byte())
                  if not skip_marginals else torch.softmax(emissions, dim=-1))

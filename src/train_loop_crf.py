@@ -221,9 +221,15 @@ def run_dataloader(
 
     for batch in loader:
         embeddings, mask, label, propeptides = batch
-        embeddings = embeddings.to(device)
-        mask = mask.to(device)
-        label = label.long().to(device)
+        # non_blocking lets the copy overlap with compute. It is only effective
+        # because the loaders set pin_memory=True on CUDA, and it matters here
+        # because the padded embedding batch is the largest tensor moved each
+        # step -- 1536 x L_max x batch floats, over 1 GB at batch 100 / L 2000.
+        # Same values either way; PyTorch inserts the sync before first use.
+        nb = device.type == 'cuda'
+        embeddings = embeddings.to(device, non_blocking=nb)
+        mask = mask.to(device, non_blocking=nb)
+        label = label.long().to(device, non_blocking=nb)
 
         if do_train:
             model.zero_grad()
@@ -577,7 +583,10 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
 
     Use --outer_fold N (0-4) to run a single fold in parallel with other processes.
     '''
-    if args.num_cpu_threads:
+    # getattr, to match train() -- callers that build an args Namespace by hand
+    # (test_smoke.py) do not necessarily set every CLI field, and a direct
+    # attribute read turns that into an AttributeError deep inside the run.
+    if getattr(args, 'num_cpu_threads', None):
         torch.set_num_threads(args.num_cpu_threads)
         print(f'PyTorch CPU threads: {args.num_cpu_threads}', flush=True)
 
