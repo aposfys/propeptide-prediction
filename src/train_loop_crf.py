@@ -273,10 +273,14 @@ def run_training_for_params(
 ) -> Tuple[Dict, float]:
     '''Train for args.epochs with a constant LR and best-on-validation checkpointing.
 
-    Faithful to the original DeepPeptide loop and identical to the esm2-propeptide
-    model: constant Adam LR (no scheduler). Early stopping on propeptide F1 is
-    retained, but the best checkpoint is saved regardless, so it does not change
-    the reported (best-checkpoint) result — it only skips the divergent tail.
+    Constant Adam LR, no scheduler, matching the original DeepPeptide loop and the
+    esm2-propeptide model.
+
+    DEVIATION from upstream: upstream has no early stopping at all — it runs the
+    full epoch budget and keeps the best checkpoint. The patience counter here can
+    therefore change the result: a plateau longer than --patience followed by a
+    late improvement is unrecoverable, so this is a training-regime choice, not a
+    free saving. It must be applied identically to every embedder being compared.
 
     `use_focal` adds the auxiliary focal term on the emissions. It defaults to
     False, which is the faithful setting and the one the published ESM3/ESM-2
@@ -779,11 +783,17 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
             open(os.path.join(args.out_dir, f'fold_summary_outer{args.outer_fold}.json'), 'w'),
             indent=2,
         )
+        # Say what actually happened. This used to end with "Run summarize_optuna.py
+        # once all 5 folds finish", which on a deliberate single-fold run reads as
+        # though the job stopped early with four folds outstanding. --outer_fold
+        # runs exactly one fold by design; it is the paper's ablation protocol.
         print(
             f'\nOuter fold {args.outer_fold} complete. '
             f'Mean test F1 = {np.mean(f1_scores):.4f} '
-            f'(written to fold_summary_outer{args.outer_fold}.json). '
-            f'Run summarize_optuna.py once all 5 folds finish.'
+            f'(written to fold_summary_outer{args.outer_fold}.json).\n'
+            f'This fold is finished. --outer_fold runs one fold by design, so nothing\n'
+            f'is outstanding unless you intend to run the other four separately.\n'
+            f'Summarise with:  python summarize_optuna.py --out_dir {args.out_dir}'
         )
     return summary
 
@@ -825,9 +835,13 @@ def parse_arguments() -> argparse.Namespace:
 
     p.add_argument('--use_focal', default=False, action=argparse.BooleanOptionalAction,
                    help='Add an auxiliary focal loss on the emissions to combat class '
-                        'imbalance (--use-focal to enable). Default off: this is the '
-                        'faithful loop, and the reported ESM3/ESM-2 propeptide numbers '
-                        'were produced without it.')
+                        'imbalance (--use_focal to enable, --no-use_focal to disable). '
+                        'Default off here, which is the faithful loop. NOTE: the '
+                        'esm3-propeptide branch defaults it ON, and the archived ESM3 '
+                        'propeptide run (results/esm3_prop_default) was produced with '
+                        'use_focal=true while the ESM-2 T4 baseline was not — so those '
+                        'two are not like-for-like. Pass it explicitly when comparing '
+                        'embedders.')
     p.add_argument('--space', type=str, default='table_s1', choices=sorted(SEARCH_SPACES),
                    help="Search space preset. 'table_s1' (default) is the paper's own "
                         'space (btad616 Table S1) — use it for anything compared against '
