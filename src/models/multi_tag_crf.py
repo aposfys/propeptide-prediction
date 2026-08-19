@@ -105,12 +105,12 @@ class CRF(nn.Module):
         inf = torch.as_tensor(-10000000000, dtype=self.transitions.dtype)
         # TODO could make this a buffer instead of recomputing.
         inf_matrix = torch.empty(self.transitions.shape).fill_(inf).to(self.transitions.dtype).to(self.transitions.device)
-        self.transitions.data = torch.where(self._constraint_mask.byte(), self.transitions, inf_matrix)
+        self.transitions.data = torch.where(self._constraint_mask.bool(), self.transitions, inf_matrix)
 
         if self.include_start_end_transitions:
             inf_vector = torch.empty(self.start_transitions.shape).fill_(inf).to(self.transitions.dtype).to(self.start_transitions.device)
-            self.start_transitions.data = torch.where(self._constraint_start_mask.byte(), self.start_transitions, inf_vector)
-            self.end_transitions.data = torch.where(self._constraint_end_mask.byte(), self.end_transitions, inf_vector)
+            self.start_transitions.data = torch.where(self._constraint_start_mask.bool(), self.start_transitions, inf_vector)
+            self.end_transitions.data = torch.where(self._constraint_end_mask.bool(), self.end_transitions, inf_vector)
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}(num_tags={self.num_tags})'
@@ -329,7 +329,7 @@ class CRF(nn.Module):
         # inf_matrix = torch.empty(emissions.shape).fill_(torch.as_tensor(float("-inf"))).to(emissions.device)
         inf_matrix = torch.empty(emissions.shape).fill_(torch.finfo(emissions.dtype).min).to(emissions.device)
         # inf_matrix = torch.empty(emissions.shape).fill_(torch.as_tensor(-30.0)).to(emissions.device)
-        filtered_inputs = torch.where(tag_bitmap.byte(), emissions, inf_matrix)
+        filtered_inputs = torch.where(tag_bitmap.bool(), emissions, inf_matrix)
 
         seq_score = self._compute_log_normalizer(filtered_inputs, mask)
         # torch.index_fill(emissions, )
@@ -380,7 +380,7 @@ class CRF(nn.Module):
 
             # Set score to the next score if this timestep is valid (mask == 1)
             # shape: (batch_size, num_tags)
-            score = torch.where(mask[i].unsqueeze(1), next_score, score)
+            score = torch.where(mask[i].unsqueeze(1)==1, next_score, score)
 
         # End transition score
         # shape: (batch_size, num_tags)
@@ -446,7 +446,7 @@ class CRF(nn.Module):
             # Set score to the next score if this timestep is valid (mask == 1)
             # and save the index that produces the next score
             # shape: (batch_size, num_tags)
-            score = torch.where(mask[i].unsqueeze(1), next_score, score)
+            score = torch.where(mask[i].unsqueeze(1)==1, next_score, score)
             history.append(indices)
 
         # End transition score
@@ -768,7 +768,7 @@ class CRF(nn.Module):
 
             next_score, indices = next_score.max(dim=1)
 
-            score = torch.where(mask[i].unsqueeze(1), next_score, score)
+            score = torch.where(mask[i].unsqueeze(1)==1, next_score, score)
             history.append(indices)
 
         #now we can continue as usual
@@ -797,7 +797,7 @@ class CRF(nn.Module):
             # Set score to the next score if this timestep is valid (mask == 1)
             # and save the index that produces the next score
             # shape: (batch_size, num_tags)
-            score = torch.where(mask[i].unsqueeze(1), next_score, score)
+            score = torch.where(mask[i].unsqueeze(1)==1, next_score, score)
             history.append(indices)
 
         # End transition score
