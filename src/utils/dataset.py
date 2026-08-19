@@ -5,9 +5,32 @@ import torch
 from torch.utils.data import Dataset
 import torch.nn.functional as F
 import os
+import warnings
 import pandas as pd
 from hashlib import md5
 import numpy as np
+
+
+# The whole-DataFrame `.fillna('')` calls below (proteins with no peptide or
+# propeptide annotation read as NaN, and parse_coordinate_string expects '')
+# make pandas 2.x warn that it silently downcasts object columns and will stop
+# doing so in a future version. Filtered, not "fixed", because:
+#
+#   * It is inert for this data. Under pandas 3.0 -- the future behaviour the
+#     warning is about -- the resulting frame is identical in all 12 columns,
+#     same dtypes and same values.
+#   * There is no safe code fix. On pandas 2.3.3, `.infer_objects(copy=False)`
+#     (pandas' own suggestion) and filling only the object columns BOTH still
+#     warn; a `.where(notna(), '')` rewrite silences it but changes dtypes and
+#     values.
+#
+# So do not replace the fillna calls below to chase this warning without
+# re-checking dtypes and values against the current behaviour first.
+warnings.filterwarnings(
+    'ignore',
+    message='Downcasting object dtype arrays on .fillna',
+    category=FutureWarning,
+)
 
 
 def make_hashes(names: List[str]) -> List[str]:
