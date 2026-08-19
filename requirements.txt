@@ -19,6 +19,16 @@ optuna>=3.0.0
 tensorboard>=2.8.0
 tqdm>=4.64.0
 
+# pandas: any 2.x or 3.x works. 2.x prints a FutureWarning about downcasting on
+# .fillna, which src/utils/dataset.py filters — verified inert (the frame is
+# identical under pandas 3.0, which is the behaviour being warned about). See the
+# comment there before "fixing" it; the obvious rewrites either do not silence it
+# or change dtypes and values.
+#
+# optuna is required by preflight.py as well as by the search: preflight inspects
+# any study already present in --out_dir, because resuming a finished one runs
+# zero new trials and silently returns stale hyperparameters.
+
 # NOTE: `esm` is deliberately NOT here. It is only needed to GENERATE ESM3
 # embeddings (src/utils/make_embeddings.py) — training reads precomputed .pt
 # files and never loads ESM3, whose weights are frozen. If you do need to

@@ -1,9 +1,19 @@
-# Dependencies for GENERATING ESM3 embeddings (src/utils/make_embeddings.py).
-# You only need this if you do not already have the precomputed .pt files —
-# training and the hyperparameter search do not use it.
+# Dependencies for GENERATING ESM3 embeddings (src/utils/make_embeddings.py), and
+# for repairing an existing set (src/utils/renorm_esm3_embeddings.py).
+# You only need this if you do not already have correct precomputed .pt files —
+# training and the hyperparameter search never load ESM3.
 #
 # esm3_sm_open_v1 is a gated model on Hugging Face, so authenticate first:
 #     huggingface-cli login
 #
+# VERSION SENSITIVITY. Both scripts reach into the model to apply ESM3's own final
+# LayerNorm, as `esm_model.transformer.norm(...)`. This is required: ESMOutput
+# .embeddings is the raw PRE-norm residual stream, ~840x the scale of the ESM-2
+# representations this pipeline assumes, and feeding it to the model saturates the
+# biLSTM (see README). That attribute path is an internal detail of the SDK, so if
+# a future release restructures TransformerStack, the scripts must be rechecked
+# rather than trusted. preflight.py's scale check is the backstop: correctly
+# extracted embeddings land near 0.3 * sqrt(dim), and it fails above 10x.
+#
 -r requirements.txt
-esm>=3.0.0
+esm>=3.0.0,<4.0.0

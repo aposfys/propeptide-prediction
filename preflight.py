@@ -46,6 +46,16 @@ def main():
     p.add_argument('--data_file', default='data/labeled_sequences.csv')
     p.add_argument('--partitioning_file', default='data/graphpart_assignments.csv')
     p.add_argument('--embedding_dim', type=int, default=1536)
+    p.add_argument('--out_dir', default=None,
+                   help='Intended output directory. Checked for a stale Optuna '
+                        'study and for free disk space. run_optuna_gpu.sh passes '
+                        'this automatically.')
+    p.add_argument('--n_trials', type=int, default=30,
+                   help='Trial budget the run will use; only used to judge whether '
+                        'a pre-existing study in --out_dir is already exhausted.')
+    p.add_argument('--n_sample', type=int, default=25,
+                   help='How many embedding files to spot-check (default 25). '
+                        'Checking one file cannot catch a partially written set.')
     args = p.parse_args()
 
     print('=== Environment ===')
@@ -199,6 +209,52 @@ def main():
             else:
                 ok(f'embedding scale {ratio:.2f} x sqrt(dim) (LayerNorm-like)')
 
+        if t.dtype in (torch.bfloat16, torch.float16):
+            warn(f'embeddings are stored as {t.dtype}. Training upcasts them, so the '
+                 'run works, but a half-precision set carries ~0.4% relative error. '
+                 'Re-extract in float32 for anything thesis-facing.')
+
+        # Length agreement. An embedding must have exactly one row per residue.
+        # Off-by-one or off-by-two here means the BOS/EOS handling in the
+        # extractor is wrong, which silently shifts every label by a position --
+        # the model still trains, and every metric is quietly wrong.
+        import hashlib
+        by_hash = {}
+        for s in joined['sequence']:
+            by_hash[hashlib.md5(s.encode()).digest().hex()] = len(s)
+        checked = sorted(present & needed)[:args.n_sample]
+        bad_len, bad_scale, bad_finite = [], [], []
+        for h in checked:
+            tt = torch.load(os.path.join(d, f'{h}.pt'), map_location='cpu')
+            if tt.shape[0] != by_hash[h]:
+                bad_len.append((h, tt.shape[0], by_hash[h]))
+            tt32 = tt.to(torch.float32)
+            if not torch.isfinite(tt32).all():
+                bad_finite.append(h)
+            elif tt32.abs().max() > 0:
+                r = (tt32.norm(dim=-1).median() / tt.shape[-1] ** 0.5).item()
+                if not 0.03 < r < 3:
+                    bad_scale.append((h, r))
+        if bad_len:
+            h, got, want = bad_len[0]
+            bad(f'{len(bad_len)}/{len(checked)} embeddings do not match their '
+                f'sequence length (e.g. {h}: {got} rows for a {want}-residue '
+                'protein). The extractor is mishandling BOS/EOS. This does NOT '
+                'crash training -- it shifts every label, and every metric is '
+                'silently wrong. Regenerate.')
+        elif checked:
+            ok(f'{len(checked)} spot-checked embeddings all match their sequence length')
+        if bad_finite:
+            bad(f'{len(bad_finite)}/{len(checked)} spot-checked embeddings contain '
+                f'NaN/Inf (e.g. {bad_finite[0]}) — partially written set, regenerate')
+        if bad_scale:
+            h, r = bad_scale[0]
+            bad(f'{len(bad_scale)}/{len(checked)} spot-checked embeddings are off-scale '
+                f'(e.g. {h}: {r:.2f} x sqrt(dim)). A mixed set means an interrupted '
+                'run wrote some files before a fix and some after — regenerate all.')
+        elif checked and not bad_len:
+            ok(f'{len(checked)} spot-checked embeddings consistent in scale')
+
         # RAM footprint: embeddings are cached in-process for the whole run.
         total_res = sum(len(s) for s in joined['sequence'])
         gb = total_res * args.embedding_dim * 4 / 1e9
@@ -209,7 +265,72 @@ def main():
         warn('one training process per GPU — each process keeps its own copy of that '
              'cache, so do not launch several folds concurrently on one device')
 
+        _check_out_dir(args)
+
     _report()
+
+
+def _check_out_dir(args):
+    '''Stale-study and disk-space checks on the intended output directory.'''
+    if not args.out_dir:
+        warn('no --out_dir given, so the stale-study and disk checks were skipped. '
+             'Pass it (run_optuna_gpu.sh does this automatically).')
+        return
+
+    import shutil
+
+    # Free space. Each retrained model pickles its test outputs, and those files
+    # are ~440 MB apiece: 4 per outer fold, 20 for a full nested CV.
+    if os.path.isdir(args.out_dir) or os.path.isdir(os.path.dirname(args.out_dir) or '.'):
+        target = args.out_dir if os.path.isdir(args.out_dir) else (os.path.dirname(args.out_dir) or '.')
+        free_gb = shutil.disk_usage(target).free / 1e9
+        if free_gb < 5:
+            bad(f'only {free_gb:.1f} GB free at {target}. Each fold writes 4 test-output '
+                'pickles of ~440 MB (~1.8 GB/fold, ~8.8 GB for five).')
+        elif free_gb < 15:
+            warn(f'{free_gb:.1f} GB free at {target} — enough for one fold '
+                 '(~1.8 GB) but not a full nested CV (~8.8 GB).')
+        else:
+            ok(f'{free_gb:.0f} GB free at {target}')
+
+    # THE expensive mistake: Optuna persists each study to SQLite and
+    # train_nested_cv() resumes with load_if_exists=True, running only
+    # (n_trials - already_done) more. Re-using an out_dir that already holds a
+    # completed study therefore runs ZERO new trials, silently returns the old
+    # best_params, and retrains from them -- producing fresh-looking output files
+    # from a stale search. On a multi-day run that is a very costly no-op.
+    dbs = []
+    if os.path.isdir(args.out_dir):
+        dbs = [f for f in os.listdir(args.out_dir) if f.endswith('.db')]
+    if not dbs:
+        ok(f'{args.out_dir}: no pre-existing Optuna study — this will be a fresh search')
+        return
+
+    try:
+        import optuna
+        for db in dbs:
+            path = os.path.abspath(os.path.join(args.out_dir, db))
+            names = optuna.study.get_all_study_names(f'sqlite:///{path}')
+            for n in names:
+                st = optuna.load_study(study_name=n, storage=f'sqlite:///{path}')
+                done = len([t for t in st.trials
+                            if t.state in (optuna.trial.TrialState.COMPLETE,
+                                           optuna.trial.TrialState.PRUNED)])
+                if done >= args.n_trials:
+                    bad(f'{db} already holds {done} finished trials for study "{n}", '
+                        f'and the budget is {args.n_trials}. The run would execute '
+                        'ZERO new trials and retrain from the OLD best_params, '
+                        'writing files that look fresh. Use a new --out_dir (or '
+                        'delete this .db) unless you are deliberately resuming.')
+                else:
+                    warn(f'{db} holds {done} finished trials for study "{n}"; the run '
+                         f'will resume and add {args.n_trials - done} more. Intended?')
+    except ImportError:
+        warn(f'optuna not importable, cannot inspect {dbs} — check by hand that '
+             'you are not resuming a finished study.')
+    except Exception as e:                                   # noqa: BLE001
+        warn(f'could not read the Optuna study in {args.out_dir} ({e}). Check by '
+             'hand that you are not resuming a finished study.')
 
 
 def _report():

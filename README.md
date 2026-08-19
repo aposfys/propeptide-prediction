@@ -8,6 +8,36 @@ checkpointing — with only the changes those two differences require.
 
 This branch runs the **hyperparameter search** for that model.
 
+> ### ⚠ Read this before reusing any ESM3 embeddings made before 2026-08-19
+>
+> `src/utils/make_embeddings.py` used to save `ESMOutput.embeddings`. That field is
+> ESM3's **raw pre-LayerNorm residual stream**, not the representation its own
+> output heads consume — `TransformerStack.forward` returns `self.norm(x), x, …`
+> and `ESM3.forward` unpacks it as `x, embedding, _`. fair-esm does the opposite for
+> ESM-2 (it applies `emb_layer_norm_after` and overwrites `representations[33]`), so
+> **the ESM-2 baseline trained on normalised features and ESM3 did not.**
+>
+> | features | per-token ‖x‖ |
+> |---|---|
+> | ESM-2 L33 (the baseline) | 10.12 |
+> | ESM3 after `transformer.norm` | 11.62 |
+> | ESM3 `.embeddings`, as previously saved | **9792.73** |
+>
+> ~840× too large. `LSTMCNN` has no input normalisation, so this saturates **90.7%**
+> of the biLSTM gates at initialisation. It is why the optimal learning rate
+> collapsed, why ESM-2's T4 settings "broke" ESM3, and why the first 30-trial search
+> sat on a flat plateau. Every ESM3 result predating the fix is invalid — see
+> [RESULTS.md](RESULTS.md).
+>
+> **Old embeddings can be repaired without re-running ESM3.** The final norm is
+> per-token, so it commutes with the BOS/EOS slice:
+>
+> ```bash
+> python -m src.utils.renorm_esm3_embeddings /path/to/esm3 /path/to/esm3_normed
+> ```
+>
+> `preflight.py` now refuses to start a run on mis-scaled embeddings.
+
 ## Quick start
 
 Four steps. Run everything from the repository root.
@@ -19,21 +49,40 @@ pip install -r requirements.txt
 python -c "import torch; print(torch.__version__, torch.version.cuda)"  # cuda must NOT be None
 
 # 2. check the setup before spending hours on it
-python preflight.py --embeddings_dir /path/to/embeddings/esm3
+python preflight.py --embeddings_dir /path/to/embeddings/esm3_normed \
+                    --out_dir results/esm3_prop_optuna_normed
 
-# 3. run the search
+# 3. run the search  (--out_dir MUST be new — see below)
 bash run_optuna_gpu.sh --fold 0 \
-    --embeddings_dir /path/to/embeddings/esm3 \
-    --out_dir results/esm3_prop_optuna
+    --embeddings_dir /path/to/embeddings/esm3_normed \
+    --out_dir results/esm3_prop_optuna_normed
 
 # 4. read the results
-python summarize_optuna.py --out_dir results/esm3_prop_optuna
+python summarize_optuna.py --out_dir results/esm3_prop_optuna_normed
 ```
 
-`preflight.py` verifies the dependencies, the data files, that the embeddings are
-all present, and — most importantly — that they are the right ones. ESM-2 (1280),
-ESM3 (1536) and ProstT5 (1024) embeddings are easy to mix up, and without this
-check the mistake surfaces much later as a shape error inside the first conv layer.
+`run_optuna_gpu.sh` runs preflight itself and aborts if it fails, so step 2 is only
+needed when checking a machine ahead of time.
+
+**`--out_dir` must be new for a new search.** Optuna persists each study to SQLite
+and `train_nested_cv()` resumes with `load_if_exists=True`, running only
+`n_trials - already_done` more. Pointing at a directory that already holds a
+finished study runs **zero** new trials, silently retrains from the old
+`best_params`, and writes fresh-looking output. Preflight now detects this and
+fails.
+
+### What preflight checks
+
+| check | why it matters |
+|---|---|
+| dependencies, data files, CUDA device | fails in minutes instead of hours |
+| every required embedding hash present | a missing file kills a run mid-epoch |
+| embedding dimension | ESM-2 (1280) / ESM3 (1536) / ProstT5 (1024) are easy to mix up |
+| **embedding scale ≈ 0.3 × √dim** | catches the pre-LayerNorm bug above. Same shape, same dtype, same filenames — only the values differ |
+| **rows == sequence length** | catches BOS/EOS mishandling, which shifts every label without crashing |
+| NaN/Inf, all-zero, mixed scale across files | catches a partially written extraction |
+| **stale Optuna study in `--out_dir`** | catches the zero-trial resume described above |
+| free disk, host RAM for the embedding cache | each fold writes ~1.8 GB of prediction pickles |
 
 ## What you need
 
@@ -60,8 +109,23 @@ or regenerate them (this step *does* load ESM3 and wants a GPU; note that
 
 ```bash
 huggingface-cli login
-python src/utils/make_embeddings.py data/protein_sequences.fasta /local/embeddings/esm3
+python src/utils/make_embeddings.py data/protein_sequences.fasta /local/embeddings/esm3_normed
 ```
+
+`data/protein_sequences.fasta` holds 14,583 records that deduplicate to **8,061
+unique sequences**, so that is how many `.pt` files should appear. The extractor
+**skips any hash it already finds**, so regenerating into a directory that already
+has files writes nothing and looks like success — always use a fresh directory.
+
+If you already have a set made before the LayerNorm fix, repair it instead of
+re-running ESM3 — it takes minutes on CPU rather than 8,061 GPU forward passes:
+
+```bash
+python -m src.utils.renorm_esm3_embeddings /path/to/esm3 /path/to/esm3_normed
+```
+
+It refuses to run on embeddings that already look normalised, so it cannot be
+applied twice by accident.
 
 ## Choosing a protocol
 
