@@ -171,6 +171,34 @@ def main():
         if t.dim() != 2:
             bad(f'expected a 2-D (length, dim) tensor, got {tuple(t.shape)}')
 
+        # Scale check. LSTMCNN has no input normalisation, so it assumes
+        # LayerNorm-scale features. Every correctly-extracted set lands near
+        # 0.3 * sqrt(dim): ESM-2 L33 = 0.283, ESM3 after transformer.norm = 0.297,
+        # ProstT5 last_hidden_state is post-final_layer_norm too. ESM3's
+        # ESMOutput.embeddings is the PRE-norm residual stream and sits at ~250 --
+        # ~840x too large. Same shape, same dtype, same filenames, no crash: only
+        # the magnitude of the values gives it away, which is why the dimension
+        # check above passes on broken embeddings.
+        t32 = t.to(torch.float32)
+        if not torch.isfinite(t32).all():
+            bad(f'embeddings contain NaN/Inf ({sample[0]}.pt) — the extraction run '
+                'did not finish cleanly; regenerate them')
+        elif t32.abs().max() == 0:
+            bad(f'embeddings are all zeros ({sample[0]}.pt) — likely a truncated or '
+                'half-written file; regenerate them')
+        else:
+            ratio = (t32.norm(dim=-1).median() / dim ** 0.5).item()
+            if ratio > 10:
+                bad(f'embedding scale is {ratio:.1f} x sqrt(dim); LayerNorm-ed sets '
+                    'sit near 0.3. These look like PRE-LayerNorm activations. For '
+                    'ESM3 use esm_model.transformer.norm(out.embeddings), not '
+                    'out.embeddings — see src/utils/make_embeddings.py.')
+            elif not 0.03 < ratio < 3:
+                warn(f'embedding scale is {ratio:.2f} x sqrt(dim); LayerNorm-ed sets '
+                     'sit near 0.3. Check which layer/tensor the extraction used.')
+            else:
+                ok(f'embedding scale {ratio:.2f} x sqrt(dim) (LayerNorm-like)')
+
         # RAM footprint: embeddings are cached in-process for the whole run.
         total_res = sum(len(s) for s in joined['sequence'])
         gb = total_res * args.embedding_dim * 4 / 1e9

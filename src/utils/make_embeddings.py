@@ -69,7 +69,19 @@ def generate_esm_embeddings(fasta_file, esm_embeddings_dir):
                 sequence_tokens=encoded.sequence.unsqueeze(0).to(device),
             )
 
-            seq_embedding = out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS
+            # Apply ESM3's own final LayerNorm. ESMOutput.embeddings is NOT the
+            # tensor the model's heads consume: TransformerStack.forward returns
+            # `self.norm(x), x, hiddens` and ESM3.forward unpacks it as
+            # `x, embedding, _`, so `.embeddings` is the raw pre-norm residual
+            # stream. Measured per-token L2 norm is ~9800 for the raw stream vs
+            # ~11.6 after the norm — and ~10.1 for the ESM-2 L33 representations
+            # this pipeline was built around (fair-esm applies emb_layer_norm_after
+            # and overwrites representations[33] with the normalised tensor).
+            # Feeding the raw stream to LSTMCNN, which has no input normalisation,
+            # saturates ~91% of the biLSTM gates at init.
+            # The norm is per-token over the feature dim, so it commutes with the
+            # BOS/EOS slice below.
+            seq_embedding = esm_model.transformer.norm(out.embeddings)[0, 1:-1].cpu()
             torch.save(seq_embedding, out_path)
 
 
