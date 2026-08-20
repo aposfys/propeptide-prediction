@@ -1,0 +1,18 @@
+{
+   "embeddings_dir": "/data/apostolos/embeddings/esm2",
+   "data_file": "data/labeled_sequences.csv",
+   "partitioning_file": "data/graphpart_assignments.csv",
+   "embedding": "precomputed",
+   "embedding_dim": 1280,
+   "model": "lstmcnncrf",
+   "out_dir": "results/esm2_prop_lr1e3",
+   "epochs": 50,
+   "batch_size": 20,
+   "lr": 0.001,
+   "dropout": 0.6902,
+   "conv_dropout": 0.2672,
+   "kernel_size": 5,
+   "num_filters": 48,
+   "hidden_size": 48,
+   "patience": 10
+}
