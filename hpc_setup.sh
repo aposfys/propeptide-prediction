@@ -62,8 +62,8 @@ if [ -d "${REPO_DIR}/.git" ]; then
     cd "$REPO_DIR"
     git fetch --all
     # Update each local branch to match origin
-    for branch in main deeppeptide-esm3 esm2-propeptide-only esm3-propeptide-only \
-                  deeppeptide-prost5 prost5-propeptide-only; do
+    for branch in main esm3-full esm2-propeptide esm3-propeptide \
+                  prost5-full prost5-propeptide; do
         if git show-ref --verify --quiet "refs/remotes/origin/${branch}"; then
             git checkout "$branch" --quiet 2>/dev/null || git checkout -b "$branch" "origin/${branch}" --quiet
             git pull origin "$branch" --ff-only --quiet
@@ -76,8 +76,8 @@ else
     git clone "$REPO_URL" "$REPO_DIR"
     cd "$REPO_DIR"
     # Create local tracking branches
-    for branch in deeppeptide-esm3 esm2-propeptide-only esm3-propeptide-only \
-                  deeppeptide-prost5 prost5-propeptide-only; do
+    for branch in esm3-full esm2-propeptide esm3-propeptide \
+                  prost5-full prost5-propeptide; do
         git checkout -b "$branch" "origin/${branch}" --quiet 2>/dev/null || true
     done
     git checkout main --quiet
@@ -128,7 +128,7 @@ fi
 # --- ESM-3 ---
 if [ "$SKIP_ESM3" = false ] && [ "$N_ESM3" -lt "$TOTAL_SEQS" ]; then
     log "Generating ESM-3 embeddings (${N_ESM3} done, need ${TOTAL_SEQS})..."
-    git checkout deeppeptide-esm3 --quiet
+    git checkout esm3-full --quiet
     run_in_env python src/utils/make_embeddings.py "$FASTA" "$EMB_ESM3"
     log "ESM-3 embeddings complete: $(count_files "$EMB_ESM3") files."
 else
@@ -138,7 +138,7 @@ fi
 # --- ProstT5 ---
 if [ "$SKIP_PROST5" = false ] && [ "$N_PROST5" -lt "$TOTAL_SEQS" ]; then
     log "Generating ProstT5 embeddings (${N_PROST5} done, need ${TOTAL_SEQS})..."
-    git checkout deeppeptide-prost5 --quiet
+    git checkout prost5-full --quiet
     run_in_env python src/utils/make_embeddings.py "$FASTA" "$EMB_PROST5"
     log "ProstT5 embeddings complete: $(count_files "$EMB_PROST5") files."
 else
@@ -171,8 +171,8 @@ log "      --out_dir results/main_esm2 \\"
 log "      --epochs 50 --patience 10"
 log ""
 log "For other branches, swap --embeddings_dir and --embedding_dim accordingly:"
-log "  esm2-propeptide-only  → ${EMB_ESM2}, dim=1280"
-log "  deeppeptide-esm3      → ${EMB_ESM3}, dim=1536"
-log "  esm3-propeptide-only  → ${EMB_ESM3}, dim=1536"
-log "  deeppeptide-prost5    → ${EMB_PROST5}, dim=1024"
-log "  prost5-propeptide-only → ${EMB_PROST5}, dim=1024"
+log "  esm2-propeptide  → ${EMB_ESM2}, dim=1280"
+log "  esm3-full      → ${EMB_ESM3}, dim=1536"
+log "  esm3-propeptide  → ${EMB_ESM3}, dim=1536"
+log "  prost5-full    → ${EMB_PROST5}, dim=1024"
+log "  prost5-propeptide → ${EMB_PROST5}, dim=1024"
