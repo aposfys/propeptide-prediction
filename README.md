@@ -83,7 +83,7 @@ python -m src.train_loop_crf \
 | `--patience` | 10 | early stopping: epochs without propeptide F1 improvement |
 | `--model` | `lstmcnncrf` | model architecture (`lstmcnncrf`, `lstmcnncrf_simple`, `selfattentioncrf`) |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
-| `--lr` | 1e-4 | peak learning rate (warmed up linearly, then cosine-decayed) |
+| `--lr` | 1e-4 | learning rate (constant — no scheduler, matching the ESM branches) |
 | `--dropout` | 0.1 | input and conv dropout |
 | `--num_filters` | 32 | number of CNN filters |
 | `--hidden_size` | 64 | biLSTM hidden size |
