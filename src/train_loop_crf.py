@@ -2,7 +2,10 @@
 CRF train loop — propeptide cleavage site prediction via ESM3 + LSTM-CNN-CRF.
 
 Training protocol (DeepPeptide, Bioinformatics 2023):
-  - 50 epochs with patience-based early stopping (metric: propeptide F1).
+  - 50 epochs, constant Adam LR, best-on-validation checkpointing (metric:
+    propeptide F1). No scheduler and no early stopping, matching upstream.
+    --search_patience applies inside the Optuna search only, as a declared
+    budget measure; reported models train on the full budget.
   - 5-fold nested cross-validation: Optuna inner loop (4-fold) finds best
     hyperparameters; the 4 inner-fold models per outer fold are saved and
     used as a 5×4=20-model ensemble at inference.
@@ -282,11 +285,16 @@ def run_training_for_params(
     Constant Adam LR, no scheduler, matching the original DeepPeptide loop and the
     esm2-propeptide model.
 
-    DEVIATION from upstream: upstream has no early stopping at all — it runs the
-    full epoch budget and keeps the best checkpoint. The patience counter here can
-    therefore change the result: a plateau longer than --patience followed by a
-    late improvement is unrecoverable, so this is a training-regime choice, not a
-    free saving. It must be applied identically to every embedder being compared.
+    args.patience == 0 disables the early-stopping break, which is upstream's
+    behaviour and the default for reported runs. A patience break can only ever
+    return an equal or worse model than the full budget: best-checkpoint
+    selection already is early stopping, and the break merely stops paying for
+    epochs that might still have improved — a plateau longer than --patience
+    followed by a late rise is unrecoverable.
+
+    The break is kept behind the flag for the Optuna search, which trains 4
+    models per trial (--search_patience). That is a declared budget measure for
+    ranking configurations and never touches a reported model.
 
     `use_focal` adds the auxiliary focal term on the emissions. It defaults to
     False, which is the faithful setting and the one the published ESM3/ESM-2
@@ -328,14 +336,15 @@ def run_training_for_params(
             patience_counter += 1
 
         marker = '*' if improved else ' '
+        patience_str = f'{patience_counter}/{args.patience}' if args.patience > 0 else 'off'
         print(
             f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  '
             f'val_f1={score:.4f}  best={best_score:.4f}  '
-            f'patience={patience_counter}/{args.patience}',
+            f'patience={patience_str}',
             flush=True,
         )
 
-        if patience_counter >= args.patience:
+        if args.patience > 0 and patience_counter >= args.patience:
             print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
             break
 
@@ -480,7 +489,12 @@ def objective(
 
     inner_scores = []
     orig_epochs = args.epochs
+    orig_patience = args.patience
     args.epochs = optuna_epochs  # use shorter budget for HP search
+    # The search trains 4 models per trial, so it cannot afford upstream's full
+    # budget. Early stopping here is a declared budget measure for ranking
+    # configurations; the retrained, reported model uses args.patience.
+    args.patience = args.search_patience
 
     try:
         for inner_i, inner_val in enumerate(outer_train_partitions):
@@ -524,6 +538,7 @@ def objective(
                 raise optuna.TrialPruned()
     finally:
         args.epochs = orig_epochs  # always restore so retraining uses full epoch budget
+        args.patience = orig_patience
 
     return float(np.mean(inner_scores))
 
@@ -826,8 +841,15 @@ def parse_arguments() -> argparse.Namespace:
 
     p.add_argument('--out_dir', '-od', type=str, default='train_run')
     p.add_argument('--epochs', type=int, default=50)
-    p.add_argument('--patience', type=int, default=10,
-                   help='Early stopping patience (epochs without improvement).')
+    p.add_argument('--patience', type=int, default=0,
+                   help='Early stopping patience (epochs without improvement). '
+                        '0 = disabled, run the full epoch budget and keep the '
+                        'best-on-validation checkpoint. This is upstream '
+                        'DeepPeptide behaviour and the default for reported runs.')
+    p.add_argument('--search_patience', type=int, default=10,
+                   help='Early stopping patience used inside the Optuna search '
+                        'only (4 models per trial). Does not affect the '
+                        'retrained, reported model. 0 = disabled.')
     p.add_argument('--batch_size', '-bs', type=int, default=64)
     p.add_argument('--n_trials', type=int, default=50,
                    help='Number of Optuna trials per outer fold.')
