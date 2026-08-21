@@ -465,6 +465,10 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
                                   for x in propeptide_coordinate_strings]
 
         self.data['true_propeptides'] = propeptide_coordinates
+        # This model predicts propeptides only, but evaluation/measure_performance.py
+        # joins on both columns. Empty list per protein keeps it loadable, matching
+        # esm2-propeptide.
+        self.data['true_peptides'] = [[] for _ in range(len(data))]
         self.propeptides = propeptide_coordinates
 
         self.sequences = data['sequence'].tolist()

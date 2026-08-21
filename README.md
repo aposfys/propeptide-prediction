@@ -47,14 +47,19 @@ Embeddings are computed **once** and cached as `.pt` files (one per sequence, na
 MD5 hash of the sequence). The training script only reads these files.
 
 ```bash
-python -m src.utils.make_embeddings_prost5 \
+python -m src.utils.make_embeddings \
     data/protein_sequences.fasta \
     PATH/TO/EMBEDDINGS/ \
-    --half          # fp16 halves memory; accuracy impact is negligible
+    --half          # GPU only — see below
 ```
 
 The script skips sequences whose `.pt` file already exists, so it is safe to
 interrupt and resume.
+
+> **`--half` is GPU-only.** The ProstT5 README states that "only GPUs support
+> half-precision currently; if you want to run on CPU use full-precision". On a
+> CPU run the flag is ignored with a warning and the model stays in fp32. Since
+> these branches train on the CPU-only HPC node, just omit it there.
 
 ---
 

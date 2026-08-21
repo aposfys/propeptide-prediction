@@ -1,13 +1,19 @@
 '''
 Generate ProstT5 per-residue embeddings and save as one file per sequence.
-Uses the same MD5-hash filename convention as make_embeddings.py (ESM-2),
-so the existing dataset and training pipeline work unchanged — just point
---embeddings_dir at the ProstT5 output and pass --embedding_dim 1024.
+Keeps the MD5-hash filename convention the ESM-2 and ESM3 branches use, so the
+dataset and training pipeline work unchanged — just point --embeddings_dir at
+the ProstT5 output and pass --embedding_dim 1024.
+
+This is the only ProstT5 extractor on the branch. An earlier duplicate,
+make_embeddings_prost5.py, was removed: it was identical except for a missing
+.clone() on the output slice, which made torch.save serialise the entire padded
+batch storage behind the view (~400 MB per sequence instead of ~0.2 MB).
 
 Model: Rostlab/ProstT5 (T5-encoder, 1024-dim per residue)
 Ref: https://github.com/mheinzinger/ProstT5
 '''
 import os
+import re
 import argparse
 import pathlib
 from hashlib import md5
@@ -18,6 +24,21 @@ from tqdm.auto import tqdm
 
 def hash_aa_string(string):
     return md5(string.encode()).digest().hex()
+
+
+def format_for_prostt5(sequence: str) -> str:
+    '''Apply ProstT5's documented input formatting to a raw AA sequence.
+
+    Straight from the ProstT5 README: replace rare/ambiguous residues with X,
+    put whitespace between all residues, and prepend <AA2fold> to declare the
+    input is amino acids (rather than 3Di, which takes <fold2AA>).
+
+    Single source of truth on purpose -- the batch extractor here and the
+    single-sequence path in crf_models._esm_embed must format identically, or
+    inference sees different tokens than training did.
+    '''
+    seq_clean = re.sub(r'[UZOB]', 'X', sequence.upper())
+    return '<AA2fold> ' + ' '.join(list(seq_clean))
 
 
 def _read_fasta(fasta_path):
@@ -86,9 +107,17 @@ def generate_prost5_embeddings(
     print(f'Loading ProstT5 from {model_name}...')
     tokenizer = T5Tokenizer.from_pretrained(model_name, do_lower_case=False)
     model = T5EncoderModel.from_pretrained(model_name).to(device)
-    if half_precision:
-        model = model.half()
-        print('Running in half precision (fp16)')
+    # Per the ProstT5 README: "only GPUs support half-precision currently; if you
+    # want to run on CPU use full-precision". fp16 on CPU is not just slower --
+    # several ops have no CPU kernel and raise at runtime. Downgrade rather than
+    # let the run die an hour in.
+    if half_precision and device.type != 'cuda':
+        print('WARNING: --half ignored on CPU; ProstT5 requires full precision there.')
+        half_precision = False
+    # The README writes this as model.full(); no such method exists on nn.Module
+    # or T5EncoderModel in current transformers, so .float() it is.
+    model = model.half() if half_precision else model.float()
+    print(f'Running in {"half (fp16)" if half_precision else "full (fp32)"} precision')
     model.eval()
 
     sequences = _read_fasta(fasta_file)
@@ -100,17 +129,14 @@ def generate_prost5_embeddings(
     batch = []
     n_saved = 0
 
-    for seq_idx, (seq_id, raw_seq) in enumerate(tqdm(sorted_seqs), 1):
+    for seq_id, raw_seq in tqdm(sorted_seqs):
         seq_hash = hash_aa_string(raw_seq)
         if os.path.isfile(os.path.join(embeddings_dir, f'{seq_hash}.pt')):
             n_saved += 1
             continue
 
-        # ProstT5 preprocessing: uppercase, replace non-standard AAs, space-separate
-        seq_clean = raw_seq.upper().replace('U', 'X').replace('Z', 'X').replace('O', 'X').replace('B', 'X')
-        seq_len = len(seq_clean)
-        # <AA2fold> prefix tells ProstT5 to treat input as amino acid sequence
-        seq_formatted = '<AA2fold> ' + ' '.join(list(seq_clean))
+        seq_formatted = format_for_prostt5(raw_seq)
+        seq_len = len(raw_seq)
 
         # If this sequence alone exceeds the residue budget, flush any accumulated
         # batch first so it gets processed in isolation.
@@ -125,13 +151,20 @@ def generate_prost5_embeddings(
         flush = (
             len(batch) >= max_batch
             or n_res_batch >= max_residues
-            or seq_idx == n_total
             or seq_len > max_seq_len
         )
 
         if flush:
             n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir)
             batch = []
+
+    # Flush the remainder here rather than via a `seq_idx == n_total` condition
+    # inside the loop. On a resumed run the final sequences are typically already
+    # cached, and `continue` skips the flush check -- so an end-of-loop condition
+    # silently dropped the whole trailing batch while still reporting success.
+    if batch:
+        n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir)
+        batch = []
 
     print(f'Done. {n_saved} embeddings saved to {embeddings_dir}')
 

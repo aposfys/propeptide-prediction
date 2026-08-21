@@ -1,12 +1,12 @@
 '''
 CRF train loop — propeptide-only, ProstT5 embeddings.
-- LR warmup + cosine decay
-- patience-based early stopping on propeptide F1
+- constant Adam LR (no scheduler), matching the ESM branches and upstream
+- patience-based early stopping on propeptide F1, matching esm3-propeptide
+- best-on-validation checkpointing
 - no marginals during training
 - no train metrics
 '''
 import json
-import math
 import pickle
 from typing import Dict, List, Tuple
 import os
@@ -17,7 +17,6 @@ from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
 #from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
 from .utils.manuscript_metrics import compute_all_metrics
 from torch.optim import Adam
-from torch.optim.lr_scheduler import LambdaLR
 import torch
 import numpy as np
 import argparse
@@ -103,17 +102,10 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     optimizer = Adam(model.parameters(), lr=args.lr)
     writer = SummaryWriter(args.out_dir)
 
-    base_lr = args.lr
-    warmup_epochs = max(3, int(0.05 * args.epochs))
-
-    def _lr_lambda(epoch: int) -> float:
-        if epoch < warmup_epochs:
-            return float(epoch + 1) / float(warmup_epochs)
-        progress = float(epoch - warmup_epochs) / float(max(1, args.epochs - warmup_epochs - 1))
-        cosine_val = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
-        return max(1e-6 / base_lr, cosine_val)
-
-    scheduler = LambdaLR(optimizer, lr_lambda=_lr_lambda)
+    # Constant Adam LR, no scheduler. The warmup+cosine schedule that used to
+    # live here was unique to the ProstT5 branches -- main, esm2-propeptide,
+    # esm3-propeptide and esm3-full all train at a constant LR -- so it was a
+    # confound in any ProstT5-vs-ESM comparison, not a shared baseline.
     previous_best = -1.0
     patience_counter = 0
 
@@ -127,8 +119,6 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
         stopping_metric = valid_metrics['f1 propeptides']
-        scheduler.step()
-        current_lr = optimizer.param_groups[0]['lr']
 
         improved = stopping_metric > previous_best
         if improved:
@@ -143,7 +133,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
             patience_counter += 1
 
         marker = '*' if improved else ' '
-        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={stopping_metric:.4f}  best={previous_best:.4f}  patience={patience_counter}/{args.patience}  lr={current_lr:.2e}', flush=True)
+        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={stopping_metric:.4f}  best={previous_best:.4f}  patience={patience_counter}/{args.patience}', flush=True)
 
         if patience_counter >= args.patience:
             print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
