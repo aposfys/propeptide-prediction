@@ -181,8 +181,12 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
 
         if do_train:
             pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
-            torch.nn.utils.clip_grad_norm_(model.parameters(),0.25 )
             loss.backward()
+            # Clip AFTER backward(), before step(). Upstream calls this before
+            # backward(), where the gradients do not exist yet -- so upstream's
+            # clipping is a no-op and the paper's models trained unclipped. The
+            # other branches all clip for real at 0.25; this one now matches.
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
             optimizer.step()
             writer.add_scalar('Train/loss', loss.item(), global_step=global_step)
             global_step += 1
