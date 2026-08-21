@@ -164,7 +164,10 @@ class SequenceTaggingLSTMCNN(nn.Module):
         encoded = esm_model.encode(protein)
         with torch.no_grad():
             out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
-        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
+        # `.embeddings` is the raw pre-LayerNorm residual stream, not what ESM3's
+        # own heads consume -- see make_embeddings.py. Must match the features the
+        # model was trained on. The norm is per-token, so it commutes with the slice.
+        return esm_model.transformer.norm(out.embeddings)[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, tissue_id: int = None, return_logits: bool = False):
         self.eval()
@@ -403,7 +406,10 @@ class SequenceTaggingLSTM(nn.Module):
         encoded = esm_model.encode(protein)
         with torch.no_grad():
             out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
-        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
+        # `.embeddings` is the raw pre-LayerNorm residual stream, not what ESM3's
+        # own heads consume -- see make_embeddings.py. Must match the features the
+        # model was trained on. The norm is per-token, so it commutes with the slice.
+        return esm_model.transformer.norm(out.embeddings)[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, tissue_id: int = None, return_logits: bool = False):
         self.eval()
@@ -560,7 +566,10 @@ class SequenceTaggingLSTMCNNCRF(nn.Module):
         encoded = esm_model.encode(protein)
         with torch.no_grad():
             out = esm_model(sequence_tokens=encoded.sequence.unsqueeze(0).to(device))
-        return out.embeddings[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
+        # `.embeddings` is the raw pre-LayerNorm residual stream, not what ESM3's
+        # own heads consume -- see make_embeddings.py. Must match the features the
+        # model was trained on. The norm is per-token, so it commutes with the slice.
+        return esm_model.transformer.norm(out.embeddings)[0, 1:-1].cpu()  # strip CLS/EOS; (L, 1536)
 
     def predict_from_sequence(self, sequence: str, tissue_id: int = None, return_logits: bool = False):
         self.eval()
