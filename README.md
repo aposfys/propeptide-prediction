@@ -78,9 +78,9 @@ python -m src.train_loop_crf \
 | argument | default | description |
 |---|---|---|
 | `--embedding_dim` | 1024 | ProstT5 output dimension |
-| `--epochs` | 30 | max training epochs (subject to early stopping) |
+| `--epochs` | 30 | training epochs (run in full unless `--patience` > 0) |
 | `--batch_size` | 100 | sequences per batch |
-| `--patience` | 10 | early stopping: epochs without propeptide F1 improvement |
+| `--patience` | 0 | early stopping: epochs without propeptide F1 improvement. `0` = disabled (upstream behaviour, and the default for reported runs) |
 | `--model` | `lstmcnncrf` | model architecture (`lstmcnncrf`, `lstmcnncrf_simple`, `selfattentioncrf`) |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
 | `--lr` | 1e-4 | learning rate (constant — no scheduler, matching the ESM branches) |
