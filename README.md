@@ -73,9 +73,9 @@ python -m src.train_loop_crf \
 | argument | default | description |
 |---|---|---|
 | `--embedding_dim` | 1024 | ProstT5 output dimension |
-| `--epochs` | 30 | max training epochs (subject to early stopping) |
+| `--epochs` | 30 | training epochs (run in full unless `--patience` > 0) |
 | `--batch_size` | 100 | sequences per batch |
-| `--patience` | 10 | early stopping: epochs without mean peptide+propeptide F1 improvement |
+| `--patience` | 0 | early stopping: epochs without mean peptide+propeptide F1 improvement. `0` = disabled (upstream behaviour, and the default for reported runs) |
 | `--label_type` | `multistate_with_propeptides` | CRF label scheme |
 | `--model` | `lstmcnncrf` | model architecture |
 | `--out_dir` | `train_run` | where checkpoints and logs are saved |
