@@ -75,6 +75,55 @@ Metric note: propeptide-only models use the **corrected** boundary-matching metr
 (`get_counts_for_protein` fix). The joint-model rows carry the original per-run scoring; the
 correction shifts values by <0.01 and does not change any ranking.
 
+## Training recipe and deviations from upstream
+
+Upstream DeepPeptide trains for a fixed epoch budget with a **constant Adam LR**, keeps the
+**best-on-validation checkpoint**, and has **no scheduler, no early stopping and no focal term**.
+As of 2026-08-21 every branch matches that recipe by default.
+
+Before that date the branches had drifted apart, and — worse — a run's `config.json` did not
+record which recipe it used. `--patience` was accepted and **silently ignored** on `esm3-full`
+and `esm2-propeptide`, so those configs read `"patience": 10` for runs that trained the full
+budget. What a run actually did was determined by the branch state on the day it ran.
+
+| branch | early stopping (before) | scheduler (before) | now |
+|---|---|---|---|
+| `esm3-propeptide` | active, patience 10 | none | `--patience` default 0 |
+| `esm3-propeptide-optuna-gpu` | active, patience 10 | none | default 0; `--search_patience 10` inside the search only |
+| `esm3-full` | **flag accepted, never implemented** | none | implemented, default 0 |
+| `esm2-propeptide` | **flag accepted, never implemented** | none | implemented, default 0 |
+| `prost5-propeptide` | active, patience 10 | warmup + cosine (`LambdaLR`) | scheduler removed (`be28af3`); `--patience` default 0 |
+| `prost5-full` | active, patience 10 | warmup + cosine (`LambdaLR`) | scheduler removed; patience default pending |
+
+**Why no early stopping for reported models.** Best-checkpoint selection *is* early stopping: both
+recipes return the argmax-on-validation model. A patience break can therefore only return an equal
+or worse model than the full budget — it stops paying for epochs that might still have improved. It
+cost a real result once: `esm3_prop_default_normed` was stopped at patience 10 while its training
+loss was still falling monotonically.
+
+**Why the search keeps it.** The Optuna objective trains 4 inner-fold models per trial, and outer
+fold 0 alone cost 4d23h *with* the break. `--search_patience` (default 10) applies inside the
+objective only and is restored afterwards, so it ranks configurations without touching the
+retrained, reported model. Early stopping and pruning inside a hyperparameter search are standard
+practice; the deviation is declared, not hidden.
+
+**`--use_focal` now defaults to False** on `esm3-propeptide` (it defaulted to True). Upstream trains
+on the CRF negative log-likelihood alone. The old default is why `esm3_prop_default` silently picked
+up the focal term — the confound flagged in the second disclaimer above.
+
+**Which existing rows this invalidates: almost none.** Once a run diverges to `nan`,
+`score > best_score` is `False` forever, so the checkpoint freezes at the pre-divergence peak and
+the remaining epochs cannot change the result. For a diverged run the two recipes are provably
+identical. `esm3_prop_T4_normed` (peak ep 12, `nan` ep 13) and `esm3_prop_T4_lr1e3` (peak ep 5,
+`nan` ep 6) are therefore unaffected, as are all `esm3-full` and `esm2-propeptide` rows, which
+already trained the full budget. The exceptions are `esm3_prop_default_normed` (stopped while still
+improving) and every ProstT5 row (trained under a scheduler).
+
+Other standing deviations, unchanged: gradient clipping is applied **after** `backward()` (upstream
+calls `clip_grad_norm_` before it, making upstream's clipping a no-op); `shuffle=True` on the train
+loader; `Dropout2d` → `Dropout1d`; FSDP dropped; two metric bugs fixed in `manuscript_metrics.py`.
+No run is seeded, matching upstream.
+
 ## Propeptide-only models (2-label, 51-state)
 
 | run | embedder | embeddings | lr | focal | P | R | **F1** | status |
@@ -158,6 +207,10 @@ The old search's per-trial record is in `evaluation/optuna_trials_outer0_INVALID
 | `esm3_prop_T4_normed_rep2`, `_rep3` | replicates of the headline ESM3 number, for an error bar |
 | `esm3_full_T4_normed` | joint model on fixed embeddings — pairs with `esm3_T4` and `esm2_T4` |
 | `esm2_prop_T4_test` | ESM-2 propeptide-only at lr 5.5e-3 **with test metrics** — re-establishes the untraceable 0.626 baseline |
+| `prost5_prop_T4` | ProstT5 under the unified recipe — the archived 0.2417 used a scheduler and is not comparable |
+
+All queued runs use the unified recipe (`--patience` 0, `--no-use_focal`), so they are directly
+comparable to each other and to every row above that trained the full budget.
 
 ## How runs are classified
 
@@ -166,6 +219,10 @@ Every row above is classified from its own `config.json`, not from its name:
 - `label_type: multistate_with_propeptides` → joint model (101 states). Absent → propeptide-only (51 states).
 - `embeddings_dir` ending `esm3` → pre-norm, invalid. Ending `esm3_normed` → repaired.
 - `use_focal` → `esm3_prop_default` is the only `true`; treat any comparison against it as confounded.
+- `patience` → **only meaningful for runs after 2026-08-21.** Before that it was accepted and
+  ignored on `esm3-full` and `esm2-propeptide`, so an older config recording `"patience": 10` may
+  describe a run that trained the full budget. For older runs the branch state on the run date
+  decides, not the config.
 
 Run names do **not** encode the focal setting or the task, which is how the
 `esm3_T4`-vs-`esm3_prop_T4_normed` mistake was originally made.
