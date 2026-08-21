@@ -100,6 +100,21 @@ requires the original checkpoint directories and cannot be re-run without them.
 
 ## Results — ESM3 (single fold, default HPs)
 
+> 🛑 **RETRACTED — every row below predates the training/metric unification and must be
+> regenerated.** Two changes invalidate them:
+>
+> 1. **Metric.** These numbers were scored with the upstream `get_counts_for_protein`, which
+>    reused `idx` across the true and pred loops and marked a matched true peptide at the
+>    *pred's* index. The resulting phantom row is dropped by `groupby('group')`, turning real
+>    true positives into false negatives — so **recall and F1 here are understated**. Fixed now.
+> 2. **Gradient clipping.** These models trained with upstream's `clip_grad_norm_` call placed
+>    *before* `backward()`, where no gradients exist yet — i.e. **unclipped**. Clipping now
+>    happens after `backward()` at 0.25, as on every other branch. This changes training, so
+>    re-scoring is not enough: **the ESM3 models must be retrained.**
+>
+> The ProstT5 row additionally used a warmup+cosine LR schedule and a patience break that no
+> branch uses any more. Regenerate all three rows under the current recipe before comparing.
+
 Single split (`train=[0,1,2]`, `val=[3]`, `test=[4]`), 50 epochs, best-checkpoint-on-validation
 (stopping metric = mean of peptide & propeptide F1), ±3-residue tolerance. ESM3 embeddings:
 `esm3_sm_open_v1`, 1536-dim, layer-final, full 8061/8061 coverage. **All rows below use the code's
