@@ -144,18 +144,26 @@ class CRFBaseModel(nn.Module):
     def _esm_embed(sequence: str, device: torch.device) -> torch.Tensor:
         '''Embed a single sequence with ProstT5. Returns (L, 1024) on CPU.'''
         from transformers import T5EncoderModel, T5Tokenizer
+        from ..utils.make_embeddings import format_for_prostt5
+
         tokenizer = T5Tokenizer.from_pretrained('Rostlab/ProstT5', do_lower_case=False)
         model = T5EncoderModel.from_pretrained('Rostlab/ProstT5').eval().to(device)
+        # fp16 is GPU-only for ProstT5 (README); keep CPU inference in fp32.
+        # (.float(), not the README's .full() -- that method does not exist.)
+        model = model.half() if device.type == 'cuda' else model.float()
 
-        seq_spaced = ' '.join(list(sequence))
-        ids = tokenizer(['<AA2fold> ' + seq_spaced], return_tensors='pt', add_special_tokens=True)
+        # Same formatter the extractor uses, so inference tokenises exactly as
+        # training did (in particular the [UZOB] -> X replacement, which this
+        # path used to skip).
+        ids = tokenizer([format_for_prostt5(sequence)], return_tensors='pt', add_special_tokens=True)
         input_ids = ids['input_ids'].to(device)
         attention_mask = ids['attention_mask'].to(device)
 
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-        return out.last_hidden_state[0, 1:-1].cpu()  # strip BOS/EOS → (L, 1024)
+        # Tokens are [<AA2fold>, r1..rL, </s>]: drop the prefix and the EOS.
+        return out.last_hidden_state[0, 1:len(sequence) + 1].float().cpu().clone()
 
     def predict_from_sequence(self, sequence: str, top_k: int = 5):
         self.eval()
