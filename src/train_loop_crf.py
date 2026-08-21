@@ -99,6 +99,7 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     writer = SummaryWriter(args.out_dir)
 
     previous_best = -100000000000
+    patience_counter = 0
 
     for epoch in range(args.epochs):
 
@@ -110,7 +111,8 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
         stopping_metric = (valid_metrics['f1 peptides'] + valid_metrics['f1 propeptides']) / 2
-        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}  val_f1={stopping_metric:.4f}', flush=True)
+        patience_str = f'{patience_counter}/{args.patience}' if args.patience > 0 else 'off'
+        print(f'Epoch {epoch} completed. Validation loss {valid_loss:.2f}  val_f1={stopping_metric:.4f}  patience={patience_str}', flush=True)
 
         if stopping_metric > previous_best:
             previous_best = stopping_metric
@@ -119,6 +121,16 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
             valid_metrics['epoch'] = epoch  # keep track of best early stopping.
             json.dump(valid_metrics, open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
             torch.save(model.state_dict(), os.path.join(args.out_dir, 'model.pt'))
+            patience_counter = 0
+        else:
+            patience_counter += 1
+
+        # args.patience == 0 is upstream behaviour and the default: run the full
+        # budget, keep the best-on-validation checkpoint. Until now this flag was
+        # accepted and silently ignored on this branch.
+        if args.patience > 0 and patience_counter >= args.patience:
+            print(f'Early stopping at epoch {epoch} (patience={args.patience}).', flush=True)
+            break
 
     model.load_state_dict(torch.load(os.path.join(args.out_dir, 'model.pt')))
     test_loss, test_probs, test_preds, test_peptides, test_labels = run_dataloader(test_loader, model, optimizer, writer, do_train=False)
@@ -207,7 +219,11 @@ def parse_arguments():
 
     p.add_argument('--out_dir', '-od', type=str, help='name that will be added to the runs folder output', default='train_run')
     p.add_argument('--epochs', type=int, default=30, help='number of times to iterate through all samples')
-    p.add_argument('--patience', type=int, default=10, help='early stopping patience (epochs without F1 improvement)')
+    p.add_argument('--patience', type=int, default=0,
+                   help='Early stopping patience (epochs without improvement). '
+                        '0 = disabled, run the full epoch budget and keep the '
+                        'best-on-validation checkpoint. This is upstream '
+                        'DeepPeptide behaviour and the default for reported runs.')
     p.add_argument('--batch_size', '-bs', type=int, default=100, help='samples that will be processed in parallel')
 
     p.add_argument('--lr', type=float, default=1e-4)
