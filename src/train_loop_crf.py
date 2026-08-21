@@ -1,7 +1,8 @@
 '''
 CRF train loop — propeptide-only, ProstT5 embeddings.
 - constant Adam LR (no scheduler), matching the ESM branches and upstream
-- patience-based early stopping on propeptide F1, matching esm3-propeptide
+- no early stopping by default (--patience 0): run the full epoch budget,
+  matching upstream. --patience > 0 re-enables the break.
 - best-on-validation checkpointing
 - no marginals during training
 - no train metrics
@@ -133,9 +134,12 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
             patience_counter += 1
 
         marker = '*' if improved else ' '
-        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={stopping_metric:.4f}  best={previous_best:.4f}  patience={patience_counter}/{args.patience}', flush=True)
+        patience_str = f'{patience_counter}/{args.patience}' if args.patience > 0 else 'off'
+        print(f'  {marker} epoch {epoch+1:3d}  loss={train_loss:.4f}  val_f1={stopping_metric:.4f}  best={previous_best:.4f}  patience={patience_str}', flush=True)
 
-        if patience_counter >= args.patience:
+        # args.patience == 0 is upstream behaviour and the default: run the full
+        # budget, keep the best-on-validation checkpoint.
+        if args.patience > 0 and patience_counter >= args.patience:
             print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
             break
     
@@ -234,7 +238,11 @@ def parse_arguments():
     p.add_argument('--kernel_size', type=int, default=3)
     p.add_argument('--num_filters', type=int, default=32)
     p.add_argument('--hidden_size', type=int, default=64)
-    p.add_argument('--patience', type=int, default=10, help='early stopping patience (epochs without propeptide F1 improvement)')
+    p.add_argument('--patience', type=int, default=0,
+                   help='Early stopping patience (epochs without improvement). '
+                        '0 = disabled, run the full epoch budget and keep the '
+                        'best-on-validation checkpoint. This is upstream '
+                        'DeepPeptide behaviour and the default for reported runs.')
 
     args = p.parse_args()
 
