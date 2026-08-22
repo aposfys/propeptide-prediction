@@ -117,6 +117,22 @@ best-checkpoint-on-validation (stopping metric = mean of peptide & propeptide F1
 | default HPs | 1e-4 | dropout 0.1, conv 0.1, batch 100, kernel 3, filters 32, hidden 64 | 0.399 | 0.462 |
 | **tuned (paper Table S2, fold T4)** | **5.5e-3** | dropout 0.69, conv 0.27, batch 20, kernel 5, filters 48, hidden 48 | **0.579** | **0.590** |
 
+> **Scored with the upstream metric — do not compare these numbers directly with the other
+> branches.** This branch is kept faithful to the original DeepPeptide, which means it retains
+> two upstream defects the embedder branches have since fixed:
+>
+> - `get_counts_for_protein` reuses `idx` across the true and pred loops, so a matched true
+>   peptide is marked at the *pred's* index. The resulting phantom row is dropped by
+>   `groupby('group')`, converting real true positives into false negatives — **recall and F1
+>   are understated**, more so the more false positives a model emits.
+> - `clip_grad_norm_` is called before `backward()`, where no gradients exist yet, so
+>   clipping is a no-op and these models trained **unclipped** — as the paper's did.
+>
+> Both are deliberate here. They are precisely why the comparison against Teufel et al. below
+> is like-for-like: the published figures were produced by this same code path. The
+> `esm2-propeptide`, `esm3-propeptide`, `esm3-full` and `prost5-*` branches correct both, so
+> their F1 values sit on a different footing and are **not** interchangeable with these.
+
 The default hyperparameters severely **under-train** the model — the default learning rate is 55×
 too low, so in 50 epochs it barely converges. Using the original paper's Optuna-tuned
 hyperparameters for the fold-4 outer model (Supplementary **Table S2**, row **T4**) reproduces
