@@ -201,7 +201,28 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     esm_model = ESM3.from_pretrained('esm3_sm_open_v1').eval()
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
     esm_model = esm_model.to(device)
-    print(f'Embedding on {device}')
+
+    # Force float32. Two reasons, both load-bearing:
+    #
+    # 1. COMPARABILITY. On CUDA the SDK loads ESM3 in bfloat16; on CPU it loads
+    #    float32. The sequence-only baseline (embeddings/esm3_normed) was
+    #    extracted on a CPU-only node and is therefore float32. Leaving the GPU
+    #    run in bf16 would change the numerical precision at the same time as
+    #    adding the structure track, so any difference in the result could not be
+    #    attributed to structure.
+    #
+    # 2. IT CRASHES. With structure conditioning the encoder reaches
+    #    esm3.py:116, plddt_projection(rbf_16_fn(average_plddt)), where the SDK's
+    #    default average_plddt is float32 while the projection weights are
+    #    bf16 -> "mat1 and mat2 must have the same dtype, but got Float and
+    #    BFloat16". Casting the whole model sidesteps it rather than patching one
+    #    tensor and waiting for the next mismatch.
+    #
+    # Cost is roughly double the activation memory, which matters because
+    # Geometric Attention is O(L^2) -- pair this with --max_struct_len.
+    if device.type == 'cuda':
+        esm_model = esm_model.to(torch.float32)
+    print(f'Embedding on {device}, dtype {next(esm_model.parameters()).dtype}')
 
     stats = Counter()
 
@@ -282,7 +303,10 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
             # ESM3.forward unpacks it as `x, embedding, _`. The model's own heads
             # consume the normalised tensor and LSTMCNN has no input
             # normalisation. The norm is per-token, so it commutes with the slice.
-            emb = esm_model.transformer.norm(out.embeddings)[0, 1:-1].cpu()
+            # .float() is a belt-and-braces guard: dataset.py and preflight.py
+            # both expect float32, and a half-precision tensor here would only
+            # surface much later as a dtype error during training.
+            emb = esm_model.transformer.norm(out.embeddings)[0, 1:-1].float().cpu()
 
             if emb.shape[0] != len(seq):
                 raise RuntimeError(
