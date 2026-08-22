@@ -144,7 +144,7 @@ def _load_structure(pdb_path: str, sequence: str, want_ss8: bool):
 
 def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bool,
              use_sasa: bool, use_plddt: bool, use_ss8: bool, limit: int,
-             max_struct_len: int = 0) -> None:
+             max_struct_len: int = 0, gpu_max_len: int = 0) -> None:
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
 
@@ -154,6 +154,7 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     json.dump(
         {'no_structure': no_structure, 'use_sasa': use_sasa, 'use_plddt': use_plddt,
          'use_ss8': use_ss8, 'max_struct_len': max_struct_len,
+         'gpu_max_len': gpu_max_len,
          'structures_dir': structures_dir, 'data_file': data_file},
         open(os.path.join(out_dir, 'extraction_config.json'), 'w'), indent=2,
     )
@@ -226,8 +227,28 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
 
     stats = Counter()
 
-    with torch.no_grad():
-        for acc, seq, h in tqdm(records):
+    # Geometric Attention lives in the FIRST transformer block and runs
+    # unconditionally -- the ESM3 supplementary notes that "partially or fully
+    # masked coordinates can be input", so the L x L x heads x 3 pairwise tensor
+    # is allocated whether or not coordinates are passed. At 256 v-heads that is
+    # 37.6 GiB for a ~3600-residue protein, which OOMs a 31 GiB card regardless
+    # of --max_struct_len. The sequence-only extraction only ever survived it
+    # because the CPU node had 251 GB of system RAM.
+    #
+    # So the long sequences are deferred to a second pass with the model moved
+    # to CPU: slow, but only a handful of proteins, and CPU gives the same
+    # float32 result so the output stays homogeneous.
+    if gpu_max_len > 0 and device.type == 'cuda':
+        fast = [r for r in records if len(r[1]) <= gpu_max_len]
+        slow = [r for r in records if len(r[1]) > gpu_max_len]
+    else:
+        fast, slow = records, []
+    if slow:
+        print(f'{len(slow)} sequences longer than {gpu_max_len} residues will be '
+              f'embedded on CPU in a second pass.')
+
+    def _embed_all(record_list, dev):
+        for acc, seq, h in tqdm(record_list):
             out_path = os.path.join(out_dir, f'{h}.pt')
             if os.path.isfile(out_path):
                 stats['cached'] += 1
@@ -271,7 +292,7 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
                     stats['with_plddt'] += 1
 
             encoded = esm_model.encode(protein)
-            seq_tokens = encoded.sequence.unsqueeze(0).to(device)
+            seq_tokens = encoded.sequence.unsqueeze(0).to(dev)
             kwargs = {'sequence_tokens': seq_tokens}
 
             # `coordinates` -> structure_coords feeds Geometric Attention, which
@@ -283,14 +304,14 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
                                ('secondary_structure', 'ss8_tokens')):
                 tok = getattr(encoded, field, None)
                 if tok is not None:
-                    kwargs[arg] = tok.unsqueeze(0).to(device)
+                    kwargs[arg] = tok.unsqueeze(0).to(dev)
                     stats[f'track_{arg}'] += 1
 
             if plddt is not None:
                 # Match the token length exactly (BOS/EOS get 0).
                 full = torch.zeros(seq_tokens.shape[-1], dtype=torch.float32)
                 full[1:1 + plddt.shape[0]] = plddt
-                kwargs['per_res_plddt'] = full.unsqueeze(0).to(device)
+                kwargs['per_res_plddt'] = full.unsqueeze(0).to(dev)
 
             if loaded is None:
                 stats['sequence_only'] += 1
@@ -315,6 +336,17 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
                 )
 
             torch.save(emb, out_path)
+
+    with torch.no_grad():
+        _embed_all(fast, device)
+        if slow:
+            # One transfer, not one per sequence: move the model to CPU once and
+            # run the whole long-sequence tail there.
+            print(f'\nMoving model to CPU for {len(slow)} long sequences '
+                  f'(expect minutes each, not seconds).')
+            esm_model = esm_model.to('cpu')
+            torch.cuda.empty_cache()
+            _embed_all(slow, torch.device('cpu'))
 
     print('\n=== extraction summary ===')
     for k, v in stats.most_common():
@@ -364,6 +396,14 @@ def main():
                         'single 37.6 GiB allocation. 1024 is the recommended '
                         'value and matches ESM3\'s own prompt-following '
                         'evaluation. 0 = no cap.')
+    p.add_argument('--gpu_max_len', type=int, default=0,
+                   help='Sequences longer than N residues are embedded on CPU in '
+                        'a second pass instead of the GPU. Geometric Attention '
+                        'runs unconditionally in block 1 and allocates an '
+                        'L x L x heads x 3 tensor -- 37.6 GiB at L~3600 -- so '
+                        'long proteins OOM a 31 GiB card whether or not '
+                        'structure is passed. CPU gives the same float32 result. '
+                        '2000 defers 15 of 8449 sequences (0.18%%). 0 = off.')
     p.add_argument('--limit', type=int, default=0,
                    help='Embed only the first N sequences. Use this to smoke-test '
                         'the track plumbing before committing to the full set.')
@@ -371,7 +411,8 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     generate(args.data_file, args.structures_dir, args.out_dir, args.no_structure,
-             not args.no_sasa, args.plddt, args.ss8, args.limit, args.max_struct_len)
+             not args.no_sasa, args.plddt, args.ss8, args.limit, args.max_struct_len,
+             args.gpu_max_len)
 
 
 if __name__ == '__main__':
