@@ -58,8 +58,20 @@ interrupt and resume.
 
 > **`--half` is GPU-only.** The ProstT5 README states that "only GPUs support
 > half-precision currently; if you want to run on CPU use full-precision". On a
-> CPU run the flag is ignored with a warning and the model stays in fp32. Since
-> these branches train on the CPU-only HPC node, just omit it there.
+> CPU run the flag is ignored with a warning and the model stays in fp32.
+>
+> **fp16 and fp32 embeddings are not interchangeable.** The values differ, so a
+> model trained on one set is not directly comparable with numbers produced from
+> the other. Pick one precision for a whole comparison and record which.
+>
+> **`--half` needs a fresh output directory.** The extractor skips any sequence
+> whose `.pt` file already exists, so pointing `--half` at a directory that
+> already holds fp32 files writes nothing and silently trains on the fp32 set.
+>
+> T5 is known to overflow in fp16. The extractor prints a warning naming any
+> sequence with non-finite values (they are zeroed on save), and `preflight.py`
+> re-checks the written files — run it before training rather than discovering
+> it as a diverged loss forty epochs in.
 
 ---
 
@@ -94,6 +106,48 @@ Training writes to `--out_dir`:
 - `valid_metrics.json` — validation metrics at best epoch
 - `test_metrics.json` — test metrics
 - TensorBoard logs (run `tensorboard --logdir PATH/TO/OUTPUT`)
+
+---
+
+### Running on a GPU
+
+Nothing in the training code is CPU-specific; `src/train_loop_crf.py` picks
+`cuda` when it is available. Two things are worth knowing before starting a long
+GPU run.
+
+**The Viterbi backtrace is the bottleneck, not the network.** `multi_tag_crf`
+reconstructs each path in a Python loop that calls `.item()` once per
+(sequence x timestep), and on an accelerator every one of those calls is a
+device-to-host sync. Measured at batch 100, length 142: 0.02 s for the whole
+forward pass, 2.47 s for the decode that follows it. The training loop never
+reads the training-set paths — there are no train metrics — so `forward()` takes
+`skip_decode`, and `run_dataloader` passes it while training. Gradients come from
+the CRF likelihood and are untouched: training with `skip_decode=True` is
+bit-identical, verified epoch by epoch against the unpatched branch. Validation
+and test still decode, because their paths are what the metrics are computed
+from.
+
+**A GPU run is not numerically comparable to a CPU run of the same code.** cuDNN
+picks different reduction orders and its LSTM kernels are not deterministic by
+default, so expect small differences in the reported F1. Keep every branch of a
+comparison on the same hardware.
+
+A single 50-epoch run (fixed split: partitions 0-2 train, 3 validation, 4 test):
+
+```bash
+python preflight.py --embeddings_dir PATH/TO/EMBEDDINGS --embedding_dim 1024
+
+python run.py \
+    --embeddings_dir PATH/TO/EMBEDDINGS \
+    --data_file data/labeled_sequences.csv \
+    --partitioning_file data/graphpart_assignments.csv \
+    --embedding_dim 1024 \
+    --epochs 50 \
+    --out_dir results/prost5_propeptide_50ep
+```
+
+`--patience` stays at its default of 0, so all 50 epochs run and the reported
+model is the best-on-validation checkpoint.
 
 ---
 

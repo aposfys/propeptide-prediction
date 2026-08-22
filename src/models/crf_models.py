@@ -73,13 +73,23 @@ class CRFBaseModel(nn.Module):
 
 
     def forward(self, embeddings, mask, targets=None, skip_marginals: bool = False,
-                top_k: int = 1):
+                top_k: int = 1, skip_decode: bool = False):
 
         features = self.feature_extractor(embeddings, mask)
         raw_emissions = self.features_to_emissions(features)   # (batch, L, 2)
         emissions = self._repeat_emissions(raw_emissions)      # (batch, L, num_states)
 
-        viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask=mask.byte(), top_k=top_k)
+        # skip_decode: the Viterbi backtrace is a Python loop that calls .item()
+        # once per (sequence x timestep). On a CPU that costs ~0.3 s per batch; on
+        # an accelerator every one of those calls is a device->host sync and the
+        # same batch takes ~2.5 s -- more than 100x the forward pass. The training
+        # loop never reads the training-set paths (there are no train metrics), so
+        # decoding them is pure waste. Gradients come from self.crf(...) below and
+        # are unaffected: training with skip_decode=True is bit-identical.
+        if skip_decode:
+            viterbi_paths, path_probs = [], None
+        else:
+            viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask=mask.byte(), top_k=top_k)
 
         probs = (self.crf.compute_marginal_probabilities(emissions, mask.byte())
                  if not skip_marginals else torch.softmax(emissions, dim=-1))

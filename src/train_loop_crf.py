@@ -191,7 +191,11 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
         label = label.long().to(device)
 
         if do_train:
-            pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
+            # skip_decode: nothing downstream reads the training-set Viterbi
+            # paths -- train() computes metrics on validation and test only. The
+            # backtrace is a per-timestep Python loop, so on a GPU it costs more
+            # than the rest of the epoch put together. Gradients are unaffected.
+            pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True, skip_decode=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
             optimizer.step()
@@ -201,11 +205,18 @@ def run_dataloader(loader: torch.utils.data.DataLoader,
             with torch.no_grad():
                 pos_probs, pos_preds, loss = model(embeddings, mask, label, skip_marginals=True)
 
+        epoch_loss.append(loss.item())
+
+        # Same reasoning for the accumulators: the training outputs are returned
+        # but never read, and holding them costs GBs of host RAM per epoch
+        # (probs is (batch, L, num_states) float32 for every batch).
+        if do_train:
+            continue
+
         true.extend(peptides)
         probs.append(pos_probs.detach().cpu().numpy())
         labels.append(label.detach().cpu().numpy())
         preds.extend(pos_preds)
-        epoch_loss.append(loss.item())
 
 
     epoch_loss = sum(epoch_loss)/len(epoch_loss)
