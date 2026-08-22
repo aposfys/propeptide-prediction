@@ -15,5 +15,11 @@
 # rather than trusted. preflight.py's scale check is the backstop: correctly
 # extracted embeddings land near 0.3 * sqrt(dim), and it fails above 10x.
 #
+# biotite arrives transitively with esm (ProteinChain is built on it), but
+# make_embeddings_esm3_struct.py imports biotite.structure.io.pdb directly to read
+# per-residue pLDDT out of the B-factor column -- ProteinChain.from_pdb() discards
+# b_factor and returns a constant 1.0. Pin it explicitly so that import cannot
+# break silently if esm ever drops the dependency.
 -r requirements.txt
 esm>=3.0.0,<4.0.0
+biotite>=0.40.0
