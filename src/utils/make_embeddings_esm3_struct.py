@@ -143,9 +143,20 @@ def _load_structure(pdb_path: str, sequence: str, want_ss8: bool):
 
 
 def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bool,
-             use_sasa: bool, use_plddt: bool, use_ss8: bool, limit: int) -> None:
+             use_sasa: bool, use_plddt: bool, use_ss8: bool, limit: int,
+             max_struct_len: int = 0) -> None:
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
+
+    # Record what produced this directory. Which tracks were fed is not
+    # recoverable from the .pt files, and a run's provenance must not depend on
+    # remembering the command line -- the same lesson as config.json:label_type.
+    json.dump(
+        {'no_structure': no_structure, 'use_sasa': use_sasa, 'use_plddt': use_plddt,
+         'use_ss8': use_ss8, 'max_struct_len': max_struct_len,
+         'structures_dir': structures_dir, 'data_file': data_file},
+        open(os.path.join(out_dir, 'extraction_config.json'), 'w'), indent=2,
+    )
 
     df = pd.read_csv(data_file)
 
@@ -202,7 +213,16 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
                 continue
 
             loaded = None
-            if not no_structure and manifest.get(acc, {}).get('status') == 'ok':
+            # Geometric Attention is O(L^2) in memory: a 3971-residue protein
+            # asks for a single 37.6 GiB allocation and OOMs a 31 GiB card.
+            # Above the cap the structural tracks are dropped and the protein
+            # falls back to sequence-only, exactly like the ~1.3% with no AFDB
+            # model. 1024 matches ESM3's own prompt-following evaluation, which
+            # "removes proteins with length greater than 1024".
+            too_long = max_struct_len > 0 and len(seq) > max_struct_len
+            if too_long:
+                stats['skipped_too_long'] += 1
+            elif not no_structure and manifest.get(acc, {}).get('status') == 'ok':
                 loaded = _load_structure(os.path.join(structures_dir, f'{acc}.pdb'),
                                          seq, use_ss8)
                 if loaded is None:
@@ -313,6 +333,13 @@ def main():
     p.add_argument('--ss8', action='store_true',
                    help='Enable the ss8 track. Requires mkdssp on PATH '
                         '(conda install -c conda-forge dssp); warns and masks if absent.')
+    p.add_argument('--max_struct_len', type=int, default=0,
+                   help='Drop the structural tracks for sequences longer than N '
+                        'residues; they fall back to sequence-only. Geometric '
+                        'Attention is O(L^2): a 3971-residue protein requests a '
+                        'single 37.6 GiB allocation. 1024 is the recommended '
+                        'value and matches ESM3\'s own prompt-following '
+                        'evaluation. 0 = no cap.')
     p.add_argument('--limit', type=int, default=0,
                    help='Embed only the first N sequences. Use this to smoke-test '
                         'the track plumbing before committing to the full set.')
@@ -320,7 +347,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     generate(args.data_file, args.structures_dir, args.out_dir, args.no_structure,
-             not args.no_sasa, args.plddt, args.ss8, args.limit)
+             not args.no_sasa, args.plddt, args.ss8, args.limit, args.max_struct_len)
 
 
 if __name__ == '__main__':
