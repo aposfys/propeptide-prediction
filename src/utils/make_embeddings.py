@@ -55,7 +55,7 @@ def _read_fasta(fasta_path):
     return sequences
 
 
-def _flush_batch(batch, model, tokenizer, device, embeddings_dir):
+def _flush_batch(batch, model, tokenizer, device, embeddings_dir, stats=None):
     '''Run one batch through the model and save per-residue embeddings.'''
     ids_batch, raw_seqs_batch, formatted_batch, lens_batch = zip(*batch)
 
@@ -84,7 +84,23 @@ def _flush_batch(batch, model, tokenizer, device, embeddings_dir):
             continue
         # Offset 1 skips the <AA2fold> prefix token; take exactly s_len residue positions
         emb = output.last_hidden_state[b_idx, 1:s_len + 1].float().cpu().clone()
-        emb[emb != emb] = 0.0  # NaN → 0
+
+        # Do not let a bad value pass silently. T5 in fp16 can overflow to inf
+        # and then produce NaN, and both survive into the .pt file looking like
+        # a normal embedding -- the training run only shows it much later as a
+        # diverged loss. Zeroing NaN is what this script always did; the counter
+        # and the warning are what make a broken --half run visible while it is
+        # still cheap to redo in fp32.
+        n_bad = int((~torch.isfinite(emb)).sum())
+        if n_bad:
+            print(f'WARNING: {ids_batch[b_idx]} (len={s_len}) has {n_bad} non-finite '
+                  f'value(s) out of {emb.numel()} — zeroed. If this run used --half, '
+                  'redo it in full precision.')
+            if stats is not None:
+                stats['bad_seqs'] += 1
+                stats['bad_values'] += n_bad
+        emb[~torch.isfinite(emb)] = 0.0
+
         torch.save(emb, out_path)
         n_saved += 1
     return n_saved
@@ -128,6 +144,7 @@ def generate_prost5_embeddings(
 
     batch = []
     n_saved = 0
+    stats = {'bad_seqs': 0, 'bad_values': 0}
 
     for seq_id, raw_seq in tqdm(sorted_seqs):
         seq_hash = hash_aa_string(raw_seq)
@@ -141,7 +158,7 @@ def generate_prost5_embeddings(
         # If this sequence alone exceeds the residue budget, flush any accumulated
         # batch first so it gets processed in isolation.
         if seq_len > max_seq_len and batch:
-            n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir)
+            n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir, stats)
             batch = []
 
         batch.append((seq_id, raw_seq, seq_formatted, seq_len))
@@ -155,7 +172,7 @@ def generate_prost5_embeddings(
         )
 
         if flush:
-            n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir)
+            n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir, stats)
             batch = []
 
     # Flush the remainder here rather than via a `seq_idx == n_total` condition
@@ -163,9 +180,14 @@ def generate_prost5_embeddings(
     # cached, and `continue` skips the flush check -- so an end-of-loop condition
     # silently dropped the whole trailing batch while still reporting success.
     if batch:
-        n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir)
+        n_saved += _flush_batch(batch, model, tokenizer, device, embeddings_dir, stats)
         batch = []
 
+    if stats['bad_seqs']:
+        print(f"WARNING: {stats['bad_seqs']} sequence(s) contained "
+              f"{stats['bad_values']} non-finite value(s), zeroed on save. "
+              'Run preflight.py before training, and regenerate in full precision '
+              'if this was a --half run.')
     print(f'Done. {n_saved} embeddings saved to {embeddings_dir}')
 
 

@@ -114,7 +114,7 @@ class CRFBaseModel(nn.Module):
         return emissions_out
 
 
-    def forward(self, embeddings, mask, targets = None, skip_marginals: bool = False, top_k: int = 1):
+    def forward(self, embeddings, mask, targets = None, skip_marginals: bool = False, top_k: int = 1, skip_decode: bool = False):
 
         features = self.feature_extractor(embeddings, mask) # (batch_size, seq_len, feature_dim)
         emissions = self.features_to_emissions(features) # (batch_size, seq_len, num_labels)
@@ -122,7 +122,17 @@ class CRFBaseModel(nn.Module):
         
         # viterbi_paths = self.crf.decode(emissions=emissions, mask = mask.byte())
 
-        viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask = mask.byte(), top_k=top_k)
+        # skip_decode: the Viterbi backtrace is a Python loop that calls .item()
+        # once per (sequence x timestep). On a CPU that costs ~0.3 s per batch; on
+        # an accelerator every one of those calls is a device->host sync and the
+        # same batch takes ~2.5 s -- more than 100x the forward pass. The training
+        # loop never reads the training-set paths (there are no train metrics), so
+        # decoding them is pure waste. Gradients come from self.crf(...) below and
+        # are unaffected: training with skip_decode=True is bit-identical.
+        if skip_decode:
+            viterbi_paths, path_probs = [], None
+        else:
+            viterbi_paths, path_probs = self.crf.decode(emissions=emissions, mask = mask.byte(), top_k=top_k)
 
         #pad the viterbi paths
         # max_pad_len = max([len(x) for x in viterbi_paths])
