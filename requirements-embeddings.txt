@@ -20,6 +20,14 @@
 # per-residue pLDDT out of the B-factor column -- ProteinChain.from_pdb() discards
 # b_factor and returns a constant 1.0. Pin it explicitly so that import cannot
 # break silently if esm ever drops the dependency.
+# httpx is esm's own dependency, but list it explicitly: if esm is ALREADY present
+# in the env, pip reports "Requirement already satisfied: esm" and never resolves
+# its dependency tree, so a partial earlier install leaves httpx missing. That
+# fails at import time, not install time --
+#     esm/models/esm3.py -> esm/sdk/__init__.py -> esm/sdk/forge.py -> import httpx
+# so `from esm.models.esm3 import ESM3` raises ModuleNotFoundError even though
+# `pip install -r` reported success. Naming it here makes pip check it directly.
 -r requirements.txt
 esm>=3.0.0,<4.0.0
 biotite>=0.40.0
+httpx>=0.23.0
