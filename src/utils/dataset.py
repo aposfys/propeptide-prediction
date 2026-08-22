@@ -483,6 +483,36 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
 
         if pt_path not in _EMBEDDING_CACHE:
             try:
+                # NOTE: this cache can hold far more RAM than the tensor shapes suggest.
+                # torch.save serialises a tensor's whole underlying storage, not just the
+                # region it views, so an embedding sliced out of a padded batch and saved
+                # without .clone() carries the entire batch. `.to(torch.float32)` does NOT
+                # break that link -- Tensor.to() returns *the same object* when the dtype
+                # already matches, so the oversized storage is what gets cached.
+                #
+                # Measured on /data/apostolos/embeddings/esm2 (2026-08-21): a (1020, 1280)
+                # float32 tensor, contiguous, 5.2 MB of values sitting on 83.8 MB of
+                # storage. 1022 padded positions x 16 batch x 1280 x 4 = 83.8 MB exactly,
+                # i.e. each file holds a 16-sequence batch. The set is 134 GiB rather than
+                # ~9 GiB, and a run caches ~150 GB instead of the ~9.5 GB preflight.py
+                # predicts. That fits a 251 GB node single-process, which is why it stayed
+                # invisible, but it rules out running folds in parallel.
+                #
+                # The VALUES ARE CORRECT -- verified: row counts match sequence lengths,
+                # and two files of identical byte size hold different shapes (1020 vs 1021)
+                # and different contents. No published number is affected. The current
+                # make_embeddings.py is batch-1 and only ~1.002x over; the 16-batch set
+                # came from an extractor no longer in this repo.
+                #
+                # To reclaim it, rewrite the files into a fresh directory (no embedder
+                # re-run needed -- .clone() copies the values onto a storage sized to them):
+                #     t = torch.load(f, map_location='cpu'); c = t.clone()
+                #     assert torch.equal(t, c) and c.shape == t.shape and c.dtype == t.dtype
+                #     torch.save(c, dst / f.name)
+                # Detect affected files with:
+                #     t.untyped_storage().nbytes() > t.numel() * t.element_size()
+                # Then check the new dir with preflight.py (--embedding_dim 1280), which
+                # lives on the esm3 and prost5 branches, before deleting the original.
                 _EMBEDDING_CACHE[pt_path] = torch.load(pt_path).to(torch.float32)
             except FileNotFoundError:
                 raise FileNotFoundError(
