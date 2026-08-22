@@ -1,6 +1,6 @@
 '''
-Validate the setup before starting a long run. This branch runs on CPU, so a
-missing GPU is reported for information only, not as a failure.
+Validate the setup before starting a long run. These branches run on either CPU
+or GPU, so a missing GPU is reported for information only, not as a failure.
 
 Written for the hand-off case: the code is staged on one machine and the run
 happens on another. Everything checked here otherwise fails minutes-to-hours
@@ -58,7 +58,8 @@ def main():
                f'({props.total_memory / 1e9:.0f} GB), cuda {torch.version.cuda}')
         else:
             ok(f'no CUDA GPU — running on CPU (torch.version.cuda='
-               f'{torch.version.cuda}). Expected on this branch.')
+               f'{torch.version.cuda}). Fine for training; note that ProstT5 '
+               '--half needs a GPU.')
 
         n_cpu = os.cpu_count() or 1
         ok(f'{n_cpu} CPU cores visible; torch default threads '
@@ -148,13 +149,19 @@ def main():
         # downstream would complain -- the CRF just trains on a shifted sequence.
         by_hash = {md5(s.encode()).digest().hex(): s for s in joined['sequence']}
         bad_len = []
+        nonfinite = []
         for h in sample[:200]:
             seq = by_hash.get(h)
             if seq is None:
                 continue
-            rows = torch.load(os.path.join(d, f'{h}.pt'), map_location='cpu').shape[0]
+            tt = torch.load(os.path.join(d, f'{h}.pt'), map_location='cpu')
+            rows = tt.shape[0]
             if rows != len(seq):
                 bad_len.append((h, rows, len(seq)))
+            # Checked on every sampled file, not just one: a --half extraction can
+            # overflow on a handful of long sequences and leave the rest perfect.
+            if not torch.isfinite(tt.to(torch.float32)).all():
+                nonfinite.append(h)
         if bad_len:
             h, rows, n = bad_len[0]
             bad(f'{len(bad_len)} of the {min(len(sample), 200)} sampled embeddings have the '
@@ -162,6 +169,13 @@ def main():
                 'The prefix/EOS slice is off — regenerate with src/utils/make_embeddings.py.')
         else:
             ok(f'row counts match sequence lengths on {min(len(sample), 200)} sampled files')
+
+        if nonfinite:
+            bad(f'{len(nonfinite)} of the {min(len(sample), 200)} sampled embeddings contain '
+                f'NaN or Inf (e.g. {nonfinite[0]}.pt). This is what an fp16 (--half) '
+                'extraction looks like when T5 overflows. Regenerate in full precision.')
+        else:
+            ok(f'no NaN/Inf in {min(len(sample), 200)} sampled files')
 
         # Storage-bloat check, specific to this branch's history. A deleted
         # duplicate extractor (make_embeddings_prost5.py) saved the output slice
