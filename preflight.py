@@ -43,6 +43,11 @@ def main():
     p.add_argument('--data_file', default='data/labeled_sequences.csv')
     p.add_argument('--partitioning_file', default='data/graphpart_assignments.csv')
     p.add_argument('--embedding_dim', type=int, default=1024)
+    p.add_argument('--batch_size', type=int, default=100,
+                   help='the --batch_size the training run will use; the '
+                        'accelerator-memory probe is sized from it')
+    p.add_argument('--skip_memory_probe', action='store_true',
+                   help='skip the worst-case forward/backward on the accelerator')
     args = p.parse_args()
 
     print('=== Environment ===')
@@ -247,7 +252,99 @@ def main():
              f'folds in parallel needs ~{gb * 0.8:.0f} GB x N — check `free -g` '
              'first.')
 
+        if not args.skip_memory_probe:
+            memory_probe(joined, d, args.embedding_dim, args.batch_size)
+
     _report()
+
+
+def _probe_device():
+    import torch
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    if torch.backends.mps.is_available():
+        return torch.device('mps')
+    return None
+
+
+def memory_probe(joined, embeddings_dir, embedding_dim, batch_size):
+    '''Run the single worst batch of the epoch and report what it costs.
+
+    Activation memory here is dominated by the CRF forward algorithm, which is
+    O(batch x length x num_states^2) — at batch 100 it measures 4.96 GB per 1000
+    residues of padded length. Batches are padded to their longest member, so
+    the peak of a whole run is set by one batch: the one holding the longest
+    sequence (this dataset goes up to 3971 residues). Training shuffles, so that
+    batch can turn up at any epoch — an OOM found here costs a minute, the same
+    OOM found by the run can cost a night.
+    '''
+    import torch
+    from src.models import LSTMCNNCRF
+
+    dev = _probe_device()
+    if dev is None:
+        ok('no accelerator — CPU training is limited by host RAM, see above')
+        return
+
+    lengths = joined['sequence'].str.len().sort_values(ascending=False)
+    worst = lengths.index[:batch_size]
+    pad_len = int(lengths.iloc[0])
+    embs = []
+    for name in worst:
+        h = md5(joined.loc[name, 'sequence'].encode()).digest().hex()
+        f = os.path.join(embeddings_dir, f'{h}.pt')
+        if not os.path.isfile(f):
+            warn('memory probe skipped — some of the longest sequences have no '
+                 'embedding yet')
+            return
+        embs.append(torch.load(f, map_location='cpu').to(torch.float32))
+
+    x = torch.nn.utils.rnn.pad_sequence(embs, batch_first=True).permute(0, 2, 1)
+    mask = torch.nn.utils.rnn.pad_sequence(
+        [torch.ones(e.shape[0]) for e in embs], batch_first=True)
+    tgt = torch.zeros(mask.shape, dtype=torch.long)
+    del embs
+
+    model = LSTMCNNCRF(
+        input_size=embedding_dim, num_labels=3, dropout_input=0.1,
+        num_states=101, n_filters=32, hidden_size=64, filter_size=3,
+        dropout_conv1=0.1,
+    ).to(dev)
+
+    if dev.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats()
+        total = torch.cuda.get_device_properties(0).total_memory / 1e9
+    else:
+        total = None
+
+    try:
+        x, mask, tgt = x.to(dev), mask.to(dev), tgt.to(dev)
+        _, _, loss = model(x, mask, tgt, skip_marginals=True, skip_decode=True)
+        # The forward activations are the peak; read them before backward frees them.
+        mps_peak = (torch.mps.current_allocated_memory() / 1e9
+                    if dev.type == 'mps' else None)
+        loss.backward()
+    except RuntimeError as e:   # torch.cuda.OutOfMemoryError subclasses this
+        if 'out of memory' in str(e).lower():
+            bad(f'OUT OF MEMORY on the worst batch ({batch_size} sequences padded to '
+                f'{pad_len} residues) — this run would die mid-epoch. Lower '
+                '--batch_size (and say so in the run config, it is a training '
+                'hyperparameter, not a detail).')
+            return
+        raise
+
+    if dev.type == 'cuda':
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        msg = (f'worst batch ({batch_size} x {pad_len} residues) peaks at '
+               f'{peak:.1f} GB of {total:.0f} GB VRAM')
+        if peak > 0.85 * total:
+            warn(msg + ' — under 15% headroom; consider a smaller --batch_size')
+        else:
+            ok(msg)
+    else:
+        peak = mps_peak
+        ok(f'worst batch ({batch_size} x {pad_len} residues) allocates '
+           f'{peak:.1f} GB on {dev.type} — CUDA will be in the same range')
 
 
 def _report():
