@@ -12,21 +12,48 @@ Tracks used (all derived from the AlphaFold DB model, which is itself predicted
 from sequence alone -- no annotation enters):
 
     sequence_tokens   always
+    structure_coords  backbone coordinates, consumed by Geometric Attention
     structure_tokens  VQ-VAE tokens from atom37 coordinates
     sasa_tokens       ProteinChain.sasa()
-    per_res_plddt     AFDB per-residue confidence, from the PDB B-factor column
     ss8_tokens        ProteinChain.dssp(), opt-in via --ss8 (needs mkdssp)
+
+ESM3 has TWO independent structural pathways, and conditioning wants both
+(Hayes et al. 2025, Science 387:850, supplementary A.1.5.1 / A.1.6):
+
+    "Structure coordinates are parsed through the Geometric Attention and are
+     not embedded."
+    "Geometric Attention ... leverages fine-grained 3D information via
+     conditioning on atomic coordinates of backbone atoms. Coordinates are only
+     used as model inputs."
+    "Structure Tokens ... enable faster learning due to rich local neighborhood
+     semantics being compressed into tokens. Structure tokens are generally used
+     as model outputs."
+
+So tokens are the compressed/output representation and coordinates are the
+fine-grained input-conditioning path. Passing tokens alone -- the obvious
+reading of the SDK -- silently skips Geometric Attention entirely.
 
 Tracks deliberately NOT used:
 
     function_tokens, residue_annotation_tokens
-        Built from InterPro/UniProt annotations. The labels here ARE UniProt
-        PROPEP features, and InterPro annotates propeptide domains directly
-        (e.g. "Peptidase inhibitor I9", the subtilisin propeptide) with their
-        boundaries. Feeding these lets the model read the answer, and GraphPart
-        does not protect against it -- it partitions by sequence identity, not
-        by annotation source. It would also break the tool's purpose, which is
-        predicting propeptides for sequences that are not annotated.
+        The paper is explicit that these are annotation-derived: "Residue
+        annotations: InterPro annotations are tokenized as a multi-hot feature
+        vector (1478 dimensions) over possible InterPro labels." The labels here
+        ARE UniProt PROPEP features, and InterPro annotates propeptide domains
+        directly (e.g. "Peptidase inhibitor I9", the subtilisin propeptide) with
+        their boundaries. Feeding these lets the model read the answer, and
+        GraphPart does not protect against it -- it partitions by sequence
+        identity, not by annotation source. It would also break the tool's
+        purpose, which is predicting propeptides for unannotated sequences.
+
+    per_res_plddt, average_plddt
+        Available, and AFDB gives us real values, but the paper rules them out:
+        "There are two additional tracks used during pretraining only: (h)
+        per-residue confidence (pLDDT) and (i) averaged confidence (pLDDT). At
+        inference time, these values are fixed, and these tracks are equivalent
+        to adding a constant vector z_plddt." Feeding real pLDDT at inference
+        adds no information and departs from the convention the model expects.
+        --plddt exists to test that claim, and is off by default.
 
 Other design decisions:
 
@@ -206,12 +233,17 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
             seq_tokens = encoded.sequence.unsqueeze(0).to(device)
             kwargs = {'sequence_tokens': seq_tokens}
 
-            for field, arg in (('structure', 'structure_tokens'),
+            # `coordinates` -> structure_coords feeds Geometric Attention, which
+            # is a separate pathway from the embedded structure tokens. Passing
+            # tokens alone skips it and loses the fine-grained 3D conditioning.
+            for field, arg in (('coordinates', 'structure_coords'),
+                               ('structure', 'structure_tokens'),
                                ('sasa', 'sasa_tokens'),
                                ('secondary_structure', 'ss8_tokens')):
                 tok = getattr(encoded, field, None)
                 if tok is not None:
                     kwargs[arg] = tok.unsqueeze(0).to(device)
+                    stats[f'track_{arg}'] += 1
 
             if plddt is not None:
                 # Match the token length exactly (BOS/EOS get 0).
@@ -266,8 +298,13 @@ def main():
                         'track masked. Isolates the track contribution from any '
                         'other difference between this script and the original.')
     p.add_argument('--no_sasa', action='store_true', help='Disable the SASA track.')
-    p.add_argument('--no_plddt', action='store_true',
-                   help='Disable per-residue pLDDT conditioning.')
+    p.add_argument('--plddt', action='store_true',
+                   help='Feed real per-residue pLDDT. OFF by default: the ESM3 '
+                        'paper states the pLDDT tracks are used during '
+                        'pretraining only and are "equivalent to adding a '
+                        'constant vector" at inference, so this adds no '
+                        'information and departs from the expected convention. '
+                        'Kept only so the claim can be tested.')
     p.add_argument('--ss8', action='store_true',
                    help='Enable the ss8 track. Requires mkdssp on PATH '
                         '(conda install -c conda-forge dssp); warns and masks if absent.')
@@ -278,7 +315,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     generate(args.data_file, args.structures_dir, args.out_dir, args.no_structure,
-             not args.no_sasa, not args.no_plddt, args.ss8, args.limit)
+             not args.no_sasa, args.plddt, args.ss8, args.limit)
 
 
 if __name__ == '__main__':
