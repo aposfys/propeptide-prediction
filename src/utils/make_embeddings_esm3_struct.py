@@ -279,7 +279,12 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     if total:
         print(f'\n  {100*stats["with_structure"]/total:.1f}% of newly embedded '
               f'sequences carry a real structure track.')
-    if stats['with_structure'] == 0 and not no_structure:
+    elif stats['cached']:
+        # Nothing was embedded this run because every hash was already on disk.
+        # That is the normal resume path, not a failure -- do not warn.
+        print(f'\n  Nothing to do: all {stats["cached"]} sequences were already '
+              f'in --out_dir. Use a fresh directory to re-extract.')
+    if total and stats['with_structure'] == 0 and not no_structure:
         print('\n  WARNING: no sequence got a structure track. This output is '
               'identical to the sequence-only baseline -- check the manifest.')
 
