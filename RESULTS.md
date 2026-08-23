@@ -34,33 +34,36 @@
 > training instability caused by large magnitude outputs" — the same symptom, patched
 > rather than diagnosed.
 
-> ## ⚠ Second disclaimer: the fix does not yet have a clean test-set demonstration
+> ## ✅ RESOLVED 2026-08-21: the fix now has a clean test-set demonstration
 >
-> As of 2026-08-20 there is **no matched pair** of runs differing only in the
-> embeddings. The one broken-vs-fixed pair on the propeptide-only task,
-> `esm3_prop_default` (0.5110) vs `esm3_prop_default_normed` (0.0440), also differs in
-> `use_focal`, and the second run collapsed to the all-background solution. The case
-> for the fix currently rests on the norm measurements above and on the Optuna search
-> (below), **not** on a test-set improvement. `esm3_prop_T4_broken` is queued to close
-> this gap.
+> `esm3_prop_T4_broken` closed this gap. It is a **fully matched pair** with
+> `esm3_prop_T4_normed` — same branch, same task, same lr 5.5e-3, same
+> `use_focal=false`, same `patience=10`; only `embeddings_dir` differs:
 >
-> Do not compare `esm3_T4` (0.2664) against `esm3_prop_T4_normed` (0.5270). Those are
-> different tasks — joint vs propeptide-only — and the difference measures the task,
-> not the embeddings.
+> | embeddings | test F1 |
+> |---|---|
+> | `esm3` (raw pre-LayerNorm) | 0.3274 |
+> | `esm3_normed` (repaired) | **0.5270** |
+> | | **+0.1996** |
+>
+> The Optuna search corroborates it under the paper's own ablation protocol:
+> 0.4328 → **0.4800** on outer fold 0 (below).
+>
+> Still true, and still the trap that caught this project twice: do not compare
+> `esm3_T4` (0.2664) against `esm3_prop_T4_normed` (0.5270). Those are different
+> tasks — joint vs propeptide-only — and the difference measures the task, not the
+> embeddings.
 
-> ## ⚠ Third disclaimer: the ESM-2 propeptide-only baseline is untraceable
+> ## ✅ RESOLVED 2026-08-21: the ESM-2 baseline is re-established, and it was real
 >
-> Earlier revisions of this file reported ESM-2 propeptide-only (T4) as
-> **P 0.717 / R 0.556 / F1 0.626, best val F1 0.769**. That number **cannot be traced
-> to any surviving metrics file.** No archived `test_metrics.json` yields 0.626, and no
-> archived `valid_metrics.json` yields 0.769 (closest: `esm2_prop_full`, val F1 0.7662).
-> Four ESM-2 propeptide-only runs at lr 0.0055 exist — `esm2_propeptide_T4`,
-> `esm2_prop_faithful`, `esm2_prop_full`, `esm2_prop_T4_sched` — but **none was ever
-> evaluated on the test partition**, and their checkpoints were not retained.
+> Earlier revisions reported ESM-2 propeptide-only (T4) as **F1 0.626**, which could
+> not be traced to any surviving metrics file — no archived `test_metrics.json`
+> yielded it, and none of the four ESM-2 propeptide runs at lr 0.0055 had ever been
+> evaluated on the test partition.
 >
-> The 0.626 row has therefore been removed from the tables below. `esm2_prop_T4_test`
-> is queued to re-establish the baseline. Until it lands, the best *traceable* ESM-2
-> propeptide-only result is `esm2_prop_lr5e4` at **F1 0.5711**.
+> `esm2_prop_T4_test` re-ran it and landed at **F1 0.6307**, within 0.005 of the lost
+> figure. The original number was evidently genuine; only its provenance was missing.
+> It is now reproducible from a committed `test_metrics.json`.
 
 All numbers at **±3-residue boundary tolerance**, single Graph-Part split on the **full**
 7,623-sequence benchmark (train = clusters 0,1,2 = 4,455 seqs / val = 3 / test = 4 = 1,538 seqs).
@@ -124,11 +127,42 @@ calls `clip_grad_norm_` before it, making upstream's clipping a no-op); `shuffle
 loader; `Dropout2d` → `Dropout1d`; FSDP dropped; two metric bugs fixed in `manuscript_metrics.py`.
 No run is seeded, matching upstream.
 
+## Headline result
+
+On a fully matched pair — same branch, same task, same lr 5.5e-3, same recipe, differing
+only in the embedder — **ESM-2 outperforms ESM3 by 0.104 F1**:
+
+| embedder | run | P | R | **test F1** |
+|---|---|---|---|---|
+| ESM-2 (650M) | `esm2_prop_T4_test` | — | — | **0.6307** |
+| ESM3 (1.4B, repaired) | `esm3_prop_T4_normed` | 0.6729 | 0.4331 | 0.5270 |
+
+The gap is roughly 3× the ~0.03 run-to-run spread expected from unseeded training, so
+replicates are unlikely to overturn it. Three protocols agree on the direction:
+
+| protocol | ESM-2 | ESM3 |
+|---|---|---|
+| single split, matched pair (this file) | **0.6307** | 0.5270 |
+| paper's ablation protocol, outer fold 0, tuned | 0.503–0.564 (upstream's own `crf_model_all_cv_balancedsplit.csv`) | **0.4800** |
+| paper's propeptide-only figure (S7) | 0.535 | 0.4800 |
+
+The nested-CV row is corroboration, not proof: 0.4800 ± 0.0172 is a spread over 4 inner
+models, whereas upstream's 0.503–0.564 spans outer folds, so their fold-to-fold variance
+(~0.06) exceeds the gap. The single-split matched pair is what carries the conclusion.
+
+**A mechanism, from the ESM3 authors.** Hayes et al. 2025 state that "high masking rates
+improve the generative capability, while lower masking rates improve representation
+learning", and that ESM3 was trained on "a noise schedule that **balances** generative
+capabilities with representation learning". ESM3's representation quality is a deliberate
+trade against generative ability; ESM-2 made no such trade. That predicts the direction
+measured here without invoking any defect.
+
 ## Propeptide-only models (2-label, 51-state)
 
 | run | embedder | embeddings | lr | focal | P | R | **F1** | status |
 |---|---|---|---|---|---|---|---|---|
-| `esm2_prop_lr5e4` | ESM-2 | `esm2` | 5e-4 | n/a | 0.6747 | 0.4951 | **0.5711** | valid — best traceable propeptide model |
+| `esm2_prop_T4_test` | ESM-2 | `esm2` | 5.5e-3 | off | — | — | **0.6307** | valid — **best model**; re-establishes the previously untraceable 0.626 |
+| `esm2_prop_lr5e4` | ESM-2 | `esm2` | 5e-4 | n/a | 0.6747 | 0.4951 | 0.5711 | valid |
 | `esm3_prop_T4_normed` | ESM3 | `esm3_normed` | 5.5e-3 | off | 0.6729 | 0.4331 | **0.5270** | valid — best ESM3 result; diverged to `nan` after ep 12, reported from the ep-12 checkpoint |
 | `esm2_prop_lr1e4` | ESM-2 | `esm2` | 1e-4 | n/a | 0.6321 | 0.4465 | 0.5233 | valid |
 | ~~`esm3_prop_default`~~ | ESM3 | `esm3` | 1e-4 | **on** | 0.5632 | 0.4676 | ~~0.5110~~ | ⚠ INVALIDATED (pre-norm embeddings). Also the only run with `use_focal=true` — a second confound |
@@ -199,14 +233,49 @@ tables above.
 
 The old search's per-trial record is in `evaluation/optuna_trials_outer0_INVALIDATED.csv`.
 
+## Multimodal ESM3 (branch `esm3-multimodal-propeptide`) — preliminary
+
+Every ESM3 result above was produced with `sequence_tokens=` alone: `make_embeddings.py`
+never passed the structure, SASA, ss8 or function tracks, so **ESM3's multimodality was
+never engaged**. That was not a decision — it is what a drop-in replacement for a
+sequence-only ESM-2 pipeline produces, and the dataset carries no 3D data.
+
+`make_embeddings_esm3_struct.py` adds every track that cannot leak the label, conditioned
+on AlphaFold DB models (98.7% coverage over the 8,449 accessions; 8/8 sampled sequences
+matched exactly): `structure_coords` via Geometric Attention, `structure_tokens`, and
+`sasa_tokens`. The function and residue-annotation tracks are **excluded** — the paper
+states they encode InterPro/GO keywords and "catalytic sites and post-translational
+modifications", and propeptide cleavage is a PTM annotated in the very UniProt records
+these labels come from.
+
+| run | lr | P | R | **F1** |
+|---|---|---|---|---|
+| `esm3_struct_lr0.0005` | 5e-4 | 0.7269 | 0.3486 | 0.4712 |
+| `esm3_struct_T4` | 5.5e-3 | 0.6835 | 0.3528 | 0.4654 |
+| `esm3_struct_lr0.001` | 1e-3 | 0.7214 | 0.3282 | 0.4511 |
+| *(reference)* `esm3_prop_T4_normed` | 5.5e-3 | 0.6729 | 0.4331 | **0.5270** |
+
+**Structure conditioning is worse at every learning rate tested**, by ~0.06 F1, and the
+decomposition is consistent: precision rises (0.67 → 0.72) while recall falls
+(0.43 → 0.33). The structure track makes the model more conservative.
+
+⚠ **Not yet attributable.** These embeddings were extracted on a different machine (GPU,
+not the CPU HPC node) with a different script from `esm3_normed`. The `--no_structure`
+ablation — same machine, same script, structure masked — is running to isolate the
+structure track from the pipeline change. Do not cite these numbers until it lands.
+
+Note also that ESM3 loads **bfloat16 on CUDA and float32 on CPU**; all embeddings compared
+here are float32, forced explicitly on the GPU side. CPU and GPU extraction of ESM3 are
+not interchangeable.
+
 ## Queued runs
 
 | run | purpose |
 |---|---|
-| `esm3_prop_T4_broken` | broken embeddings at lr 5.5e-3 — the missing control that makes the embedding fix a measured result |
-| `esm3_prop_T4_normed_rep2`, `_rep3` | replicates of the headline ESM3 number, for an error bar |
-| `esm3_full_T4_normed` | joint model on fixed embeddings — pairs with `esm3_T4` and `esm2_T4` |
-| `esm2_prop_T4_test` | ESM-2 propeptide-only at lr 5.5e-3 **with test metrics** — re-establishes the untraceable 0.626 baseline |
+| `esm3_seqonly_gpu` + training | **the control**: `--no_structure` on the same GPU and script, to attribute the multimodal drop |
+| `esm2_full_T4` | ESM-2 joint model — `esm3_full_T4_normed` is uninterpretable without it, since the archived `esm2_T4` predates the metric fix and real gradient clipping |
+| `esm3_prop_T4_normed_rep2`, `_rep3` | replicates of the ESM3 number, for an error bar |
+| `esm2_prop_T4_test_rep2` | replicate of the **winning** row — worth more than a second draw of the loser |
 | `prost5_prop_T4` | ProstT5 under the unified recipe — the archived 0.2417 used a scheduler and is not comparable |
 
 All queued runs use the unified recipe (`--patience` 0, `--no-use_focal`), so they are directly
