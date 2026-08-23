@@ -129,13 +129,21 @@ No run is seeded, matching upstream.
 
 ## Headline result
 
-On a fully matched pair — same branch, same task, same lr 5.5e-3, same recipe, differing
-only in the embedder — **ESM-2 outperforms ESM3 by 0.104 F1**:
+**ESM-2 outperforms ESM3 by 0.076 F1**, after ESM3 was given an optimisation sweep,
+a hyperparameter search and a layer sweep that ESM-2 never received:
 
 | embedder | run | P | R | **test F1** |
 |---|---|---|---|---|
 | ESM-2 (650M) | `esm2_prop_T4_test` | — | — | **0.6307** |
-| ESM3 (1.4B, repaired) | `esm3_prop_T4_normed` | 0.6729 | 0.4331 | 0.5270 |
+| ESM3 (1.4B, repaired) | `esm3_T4_b70_wd` | 0.7054 | 0.4570 | 0.5547 |
+
+At matched Table S1 settings the gap is larger — 0.6307 vs 0.5270 (`esm3_prop_T4_normed`),
+0.104. Tuning ESM3 narrowed it to 0.076; see "ESM3 optimisation sweep" below.
+
+**Caveat to state in any write-up**: ESM-2 has only ever been run at Table S1 defaults
+(batch 20, no weight decay). The batch-size and weight-decay treatment that lifted ESM3
+from 0.5270 to 0.5547 has not been applied to ESM-2, and would likely lift it too. The
+honest reading is that 0.076 is a *lower bound* on the gap.
 
 The gap is roughly 3× the ~0.03 run-to-run spread expected from unseeded training, so
 replicates are unlikely to overturn it. Three protocols agree on the direction:
@@ -232,6 +240,66 @@ are mean F1 over the 4 **inner** folds and are not comparable to the single-spli
 tables above.
 
 The old search's per-trial record is in `evaluation/optuna_trials_outer0_INVALIDATED.csv`.
+
+## ESM3 optimisation sweep
+
+Roughly a dozen configurations were tried, on GPU, to establish whether ESM3's deficit was
+a tuning artifact. It is not — but two knobs did help, and both are omitted from Table S1.
+
+**Divergence was the binding constraint, and batch size fixes it.** Every ESM3 run at
+Table S1's batch 20 explodes to `nan`; the epoch it survives to tracks batch size:
+
+| config | stable epochs | peak val | test F1 |
+|---|---|---|---|
+| T4, batch 20, wd 0 | 12 | 0.7000 | 0.5280 |
+| T4, batch 20, wd 1e-4 | 6 | 0.6814 | — |
+| **T4, batch 70, wd 1e-4** | **21** | **0.7045** | **0.5547** |
+| T4, batch 100, wd 1e-4 | 35 | 0.6979 | 0.5246 |
+
+Weight decay is worth ~+0.026 at matched settings (0.4911 → 0.5167 on the tuned
+architecture) and, combined with batch 70, delays divergence from epoch 6 to epoch 22.
+Batch 100 is stabler still but trains too slowly per epoch to reach as high an optimum.
+
+**The Optuna-tuned architecture underperforms Table S1's.** The 30-trial search
+(`esm3_prop_optuna_normed`, repaired embeddings, `space: table_s1`) selected
+`hidden_size` 16, `kernel_size` 1, `lr` 1.77e-3 — which scores 0.5167 on the single split
+versus T4's 0.5547. It was selected on the inner-fold CV mean, a different protocol with a
+smaller training set, and does not transfer.
+
+**The search space is mis-centred for ESM3**, worth noting even though re-searching was not
+affordable: the fold-0 winner pinned three of seven parameters to a boundary —
+`hidden_size` 16 (min), `kernel_size` 1 (min), `dropout` 0.696 (max ≈ 0.7). The search
+wants less capacity and more regularisation than Table S1 permits.
+
+**Validation tops out at ~0.70 regardless.** Five distinct configurations span just 0.011
+on validation (0.6935–0.7045), while ESM-2 reaches 0.7662 without any of this effort. The
+gap is not a tuning artifact.
+
+## Layer selection — the last fairness gap, now closed
+
+Upstream **tuned** ESM-2's layer, sweeping it and choosing 33 of 33 (btad616 Fig. S9; their
+`crf_model_all_cv_balancedsplit.csv` gives L32 0.494–0.542 against L33 0.503–0.564). ESM3
+had only ever been read at layer 48 of 48, chosen by analogy. That was the one respect in
+which ESM-2 received treatment ESM3 did not — and unlike batch size or weight decay, it
+could have narrowed the gap rather than lifting both models.
+
+Extraction from arbitrary blocks was added in `bc8157a` (`--layer`), via a forward hook on
+`TransformerStack`, whose `forward` returns `self.norm(x), x, hiddens` but whose caller
+discards the third value. Verified: `--layer 48` reproduces the default path **bit-for-bit**
+on 20/20 sampled sequences.
+
+| layer | peak val | test F1 | behaviour |
+|---|---|---|---|
+| **48** (final) | **0.7045** | **0.5547** | diverges at ep 22 |
+| 30 | 0.6558 | 0.5351 | never diverges — 47 stable epochs |
+
+**Layer 48 is ESM3's best, as layer 33 is ESM-2's.** Both models are read at their final
+layer, both by measurement rather than assumption, so the comparison is fair in this
+respect too.
+
+A mechanistic aside worth reporting: layer 30 trained completely stably (loss monotonically
+20.85 → 3.26 over 47 epochs, stopped by a plateau rather than a collapse) while layer 48
+diverges. The later blocks carry the task-relevant signal *and* the instability.
 
 ## Multimodal ESM3 (branch `esm3-multimodal-propeptide`)
 
