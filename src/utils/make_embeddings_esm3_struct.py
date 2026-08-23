@@ -144,7 +144,7 @@ def _load_structure(pdb_path: str, sequence: str, want_ss8: bool):
 
 def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bool,
              use_sasa: bool, use_plddt: bool, use_ss8: bool, limit: int,
-             max_struct_len: int = 0, gpu_max_len: int = 0) -> None:
+             max_struct_len: int = 0, gpu_max_len: int = 0, layer: int = 0) -> None:
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
 
@@ -154,7 +154,7 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     json.dump(
         {'no_structure': no_structure, 'use_sasa': use_sasa, 'use_plddt': use_plddt,
          'use_ss8': use_ss8, 'max_struct_len': max_struct_len,
-         'gpu_max_len': gpu_max_len,
+         'gpu_max_len': gpu_max_len, 'layer': layer,
          'structures_dir': structures_dir, 'data_file': data_file},
         open(os.path.join(out_dir, 'extraction_config.json'), 'w'), indent=2,
     )
@@ -224,6 +224,48 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     if device.type == 'cuda':
         esm_model = esm_model.to(torch.float32)
     print(f'Embedding on {device}, dtype {next(esm_model.parameters()).dtype}')
+
+    # Intermediate-layer extraction.
+    #
+    # WHY: upstream TUNED ESM-2's layer -- they swept it and chose 33 of 33
+    # (btad616 Fig. S9; their CSV has L32 at 0.494-0.542 vs L33 at 0.503-0.564).
+    # ESM3 has only ever been read at layer 48 of 48, chosen by analogy rather
+    # than measured. That is the one respect in which ESM-2 received treatment
+    # ESM3 did not, so it is the only lever that can narrow the gap rather than
+    # lift both models.
+    #
+    # It is also plausible on mechanism: ESM3's final layers specialise toward
+    # its generative objective -- the authors' own explanation for weaker
+    # representations -- so mid-network features may suit a token-level task
+    # better.
+    #
+    # HOW: ESM3.forward calls `x, embedding, _ = self.transformer(...)`, throwing
+    # the per-block hidden states away. A forward hook on the transformer catches
+    # the third return value without duplicating any of forward()'s token
+    # defaulting, so every track behaves exactly as it does normally.
+    #
+    # hiddens[i] is the output of block i+1, so layer L is hiddens[L-1] and
+    # hiddens[-1] is the pre-norm final. --layer 48 therefore reproduces the
+    # default path exactly, which is a free correctness check.
+    #
+    # The same transformer.norm is applied whichever layer is taken. It is not
+    # trained for intermediate layers, but it is a per-token LayerNorm, so it
+    # standardises scale and keeps every layer's output in the band preflight
+    # expects (~0.3 x sqrt(dim)). Without it the pre-norm residual stream is the
+    # ~840x off-scale tensor that caused the original bug.
+    captured = {}
+
+    def _grab_hiddens(_module, _inputs, output):
+        captured['hiddens'] = output[2]
+
+    hook = None
+    if layer > 0:
+        n_blocks = len(esm_model.transformer.blocks)
+        if not 1 <= layer <= n_blocks:
+            raise SystemExit(f'--layer must be in 1..{n_blocks}, got {layer}')
+        hook = esm_model.transformer.register_forward_hook(_grab_hiddens)
+        print(f'Extracting layer {layer} of {n_blocks} '
+              f'({"final -- identical to the default path" if layer == n_blocks else "intermediate"})')
 
     stats = Counter()
 
@@ -327,7 +369,8 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
             # .float() is a belt-and-braces guard: dataset.py and preflight.py
             # both expect float32, and a half-precision tensor here would only
             # surface much later as a dtype error during training.
-            emb = esm_model.transformer.norm(out.embeddings)[0, 1:-1].float().cpu()
+            raw = captured['hiddens'][layer - 1] if layer > 0 else out.embeddings
+            emb = esm_model.transformer.norm(raw)[0, 1:-1].float().cpu()
 
             if emb.shape[0] != len(seq):
                 raise RuntimeError(
@@ -347,6 +390,9 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
             esm_model = esm_model.to('cpu')
             torch.cuda.empty_cache()
             _embed_all(slow, torch.device('cpu'))
+
+    if hook is not None:
+        hook.remove()
 
     print('\n=== extraction summary ===')
     for k, v in stats.most_common():
@@ -404,6 +450,16 @@ def main():
                         'long proteins OOM a 31 GiB card whether or not '
                         'structure is passed. CPU gives the same float32 result. '
                         '2000 defers 15 of 8449 sequences (0.18%%). 0 = off.')
+    p.add_argument('--layer', type=int, default=0,
+                   help='Extract from transformer block N (1-indexed) instead of '
+                        'the final output. 0 = default/final, identical to the '
+                        'previous behaviour. ESM3-small has 48 blocks, so '
+                        '--layer 48 reproduces the default exactly. Upstream '
+                        'tuned ESM-2\'s layer (Fig. S9, 33 of 33); ESM3\'s was '
+                        'never measured, which is the one fairness gap left in '
+                        'the comparison. transformer.norm is applied whichever '
+                        'layer is taken, to keep the scale in the band preflight '
+                        'expects.')
     p.add_argument('--limit', type=int, default=0,
                    help='Embed only the first N sequences. Use this to smoke-test '
                         'the track plumbing before committing to the full set.')
@@ -412,7 +468,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     generate(args.data_file, args.structures_dir, args.out_dir, args.no_structure,
              not args.no_sasa, args.plddt, args.ss8, args.limit, args.max_struct_len,
-             args.gpu_max_len)
+             args.gpu_max_len, args.layer)
 
 
 if __name__ == '__main__':
