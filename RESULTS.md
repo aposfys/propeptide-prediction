@@ -233,7 +233,7 @@ tables above.
 
 The old search's per-trial record is in `evaluation/optuna_trials_outer0_INVALIDATED.csv`.
 
-## Multimodal ESM3 (branch `esm3-multimodal-propeptide`) — preliminary
+## Multimodal ESM3 (branch `esm3-multimodal-propeptide`)
 
 Every ESM3 result above was produced with `sequence_tokens=` alone: `make_embeddings.py`
 never passed the structure, SASA, ss8 or function tracks, so **ESM3's multimodality was
@@ -248,31 +248,71 @@ states they encode InterPro/GO keywords and "catalytic sites and post-translatio
 modifications", and propeptide cleavage is a PTM annotated in the very UniProt records
 these labels come from.
 
-| run | lr | P | R | **F1** |
-|---|---|---|---|---|
-| `esm3_struct_lr0.0005` | 5e-4 | 0.7269 | 0.3486 | 0.4712 |
-| `esm3_struct_T4` | 5.5e-3 | 0.6835 | 0.3528 | 0.4654 |
-| `esm3_struct_lr0.001` | 1e-3 | 0.7214 | 0.3282 | 0.4511 |
-| *(reference)* `esm3_prop_T4_normed` | 5.5e-3 | 0.6729 | 0.4331 | **0.5270** |
+### The pipeline reproduces, so the comparison is attributable
 
-**Structure conditioning is worse at every learning rate tested**, by ~0.06 F1, and the
-decomposition is consistent: precision rises (0.67 → 0.72) while recall falls
-(0.43 → 0.33). The structure track makes the model more conservative.
+The `--no_structure` control runs the identical script on the identical GPU with every
+structural track masked. Its best result matches the HPC's sequence-only number to
+**0.001**:
 
-⚠ **Not yet attributable.** These embeddings were extracted on a different machine (GPU,
-not the CPU HPC node) with a different script from `esm3_normed`. The `--no_structure`
-ablation — same machine, same script, structure masked — is running to isolate the
-structure track from the pipeline change. Do not cite these numbers until it lands.
+| | best test F1 |
+|---|---|
+| `esm3_prop_T4_normed` — HPC, CPU, `make_embeddings.py` | 0.5270 |
+| `esm3_seqonly_gpu_lr0.0005` — Rucker, GPU, `make_embeddings_esm3_struct.py --no_structure` | **0.5280** |
 
-Note also that ESM3 loads **bfloat16 on CUDA and float32 on CPU**; all embeddings compared
-here are float32, forced explicitly on the GPU side. CPU and GPU extraction of ESM3 are
-not interchangeable.
+Two machines, two scripts, two devices, one number. That retires the CPU-vs-GPU worry for
+this pipeline and means any difference in the structure runs is attributable to the
+structure tracks rather than to the extraction change.
+
+### Structure conditioning makes it worse
+
+Both variants were swept over lr, so best-of-sweep is the fair comparison:
+
+| ESM3 variant | best test F1 | P | R |
+|---|---|---|---|
+| sequence-only | **0.5280** | 0.7179 | 0.4176 |
+| + structure + SASA | 0.4712 | 0.7269 | 0.3486 |
+| | **−0.0568** | +0.009 | **−0.069** |
+
+**The entire loss is in recall** — 0.4176 → 0.3486, a 17% relative drop, with precision
+flat. Structural conditioning makes the model more conservative: it predicts fewer
+propeptides and misses more real ones.
+
+Full sweep:
+
+| run | embeddings | lr | P | R | **F1** |
+|---|---|---|---|---|---|
+| `esm3_seqonly_gpu_lr0.0005` | seq-only | 5e-4 | 0.7179 | 0.4176 | **0.5280** |
+| `esm3_struct_lr0.0005` | +struct | 5e-4 | 0.7269 | 0.3486 | 0.4712 |
+| `esm3_struct_T4` | +struct | 5.5e-3 | 0.6835 | 0.3528 | 0.4654 |
+| `esm3_struct_lr0.001` | +struct | 1e-3 | 0.7214 | 0.3282 | 0.4511 |
+| `esm3_seqonly_gpu_lr0.0055` | seq-only | 5.5e-3 | 0.6278 | 0.3373 | 0.4388 |
+
+One caveat stated plainly: at the *matched* lr of 5.5e-3 the structure model is slightly
+**better** (0.4654 vs 0.4388). But 5.5e-3 diverges by epoch 6 on both sets, so neither is
+trained there. At 5e-4, where both train stably for 6–9 epochs, sequence-only wins clearly.
+
+### Notes
+
+**5e-4 is the better learning rate for ESM3**, not the 5.5e-3 inherited from Table S1.
+Peak validation F1 was **0.7000** at 5e-4 versus 0.5619 at 5.5e-3 on identical data.
+
+**Divergence is an ESM3 property, not a structure one.** Every run above eventually
+explodes to `nan`, on both embedding sets, at every lr tested. Best-on-validation
+checkpointing means it costs no result, but it is worth reporting.
+
+**ESM3 loads bfloat16 on CUDA and float32 on CPU.** All embeddings compared here are
+float32, forced explicitly on the GPU side (`dde0444`). Left unforced, a GPU extraction
+would silently differ in precision from the CPU baseline.
+
+**Geometric Attention is unconditional.** It sits in the first transformer block and
+allocates an L×L×heads×3 tensor whether or not coordinates are passed — 37.6 GiB at
+L≈3,600, which OOMs a 31 GB card. The 15 sequences over 2,000 residues were embedded on
+CPU (`--gpu_max_len 2000`), giving identical float32 output.
 
 ## Queued runs
 
 | run | purpose |
 |---|---|
-| `esm3_seqonly_gpu` + training | **the control**: `--no_structure` on the same GPU and script, to attribute the multimodal drop |
 | `esm2_full_T4` | ESM-2 joint model — `esm3_full_T4_normed` is uninterpretable without it, since the archived `esm2_T4` predates the metric fix and real gradient clipping |
 | `esm3_prop_T4_normed_rep2`, `_rep3` | replicates of the ESM3 number, for an error bar |
 | `esm2_prop_T4_test_rep2` | replicate of the **winning** row — worth more than a second draw of the loser |
