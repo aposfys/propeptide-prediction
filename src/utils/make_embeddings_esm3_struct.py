@@ -142,9 +142,20 @@ def _load_structure(pdb_path: str, sequence: str, want_ss8: bool):
     return coords, sasa, plddt, ss8
 
 
+def _parse_layers(args) -> list:
+    """Resolve --layers / --layer into a list of 1-indexed blocks, or [] for the default.
+
+    --layer is kept so the commands already in RESULTS.md keep working; --layers
+    supersedes it when both are given.
+    """
+    if getattr(args, 'layers', ''):
+        return [int(x) for x in str(args.layers).replace(' ', '').split(',') if x]
+    return [args.layer] if getattr(args, 'layer', 0) else []
+
+
 def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bool,
              use_sasa: bool, use_plddt: bool, use_ss8: bool, limit: int,
-             max_struct_len: int = 0, gpu_max_len: int = 0, layer: int = 0) -> None:
+             max_struct_len: int = 0, gpu_max_len: int = 0, layers: list | None = None) -> None:
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
 
@@ -154,7 +165,7 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     json.dump(
         {'no_structure': no_structure, 'use_sasa': use_sasa, 'use_plddt': use_plddt,
          'use_ss8': use_ss8, 'max_struct_len': max_struct_len,
-         'gpu_max_len': gpu_max_len, 'layer': layer,
+         'gpu_max_len': gpu_max_len, 'layers': layers,
          'structures_dir': structures_dir, 'data_file': data_file},
         open(os.path.join(out_dir, 'extraction_config.json'), 'w'), indent=2,
     )
@@ -259,13 +270,23 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
         captured['hiddens'] = output[2]
 
     hook = None
-    if layer > 0:
+    if layers:
         n_blocks = len(esm_model.transformer.blocks)
-        if not 1 <= layer <= n_blocks:
-            raise SystemExit(f'--layer must be in 1..{n_blocks}, got {layer}')
+        for l in layers:
+            if not 1 <= l <= n_blocks:
+                raise SystemExit(f'--layers values must be in 1..{n_blocks}, got {l}')
         hook = esm_model.transformer.register_forward_hook(_grab_hiddens)
-        print(f'Extracting layer {layer} of {n_blocks} '
-              f'({"final -- identical to the default path" if layer == n_blocks else "intermediate"})')
+        # Concatenating several layers is standard practice for protein LMs: the
+        # blocks are not redundant, and a readout head can weight them itself.
+        # Layers 44 and 48 score equivalently here (val 0.7064 / 0.7045) but are
+        # not identical, so they may carry complementary signal.
+        if len(layers) == 1:
+            l = layers[0]
+            print(f'Extracting layer {l} of {n_blocks} '
+                  f'({"final -- identical to the default path" if l == n_blocks else "intermediate"})')
+        else:
+            print(f'Concatenating layers {layers} of {n_blocks} '
+                  f'-> {1536 * len(layers)}-dim (pass --embedding_dim {1536 * len(layers)} to run.py)')
 
     stats = Counter()
 
@@ -369,8 +390,15 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
             # .float() is a belt-and-braces guard: dataset.py and preflight.py
             # both expect float32, and a half-precision tensor here would only
             # surface much later as a dtype error during training.
-            raw = captured['hiddens'][layer - 1] if layer > 0 else out.embeddings
-            emb = esm_model.transformer.norm(raw)[0, 1:-1].float().cpu()
+            if layers:
+                # Norm each layer separately before concatenating, so every block
+                # lands in the same scale band. Sharing one norm across the
+                # concatenation would let a single layer dominate.
+                parts = [esm_model.transformer.norm(captured['hiddens'][l - 1])[0, 1:-1]
+                         for l in layers]
+                emb = torch.cat(parts, dim=-1).float().cpu()
+            else:
+                emb = esm_model.transformer.norm(out.embeddings)[0, 1:-1].float().cpu()
 
             if emb.shape[0] != len(seq):
                 raise RuntimeError(
@@ -450,6 +478,13 @@ def main():
                         'long proteins OOM a 31 GiB card whether or not '
                         'structure is passed. CPU gives the same float32 result. '
                         '2000 defers 15 of 8449 sequences (0.18%%). 0 = off.')
+    p.add_argument('--layers', type=str, default='',
+                   help='Comma-separated transformer blocks to extract, 1-indexed, '
+                        'e.g. "48" or "44,48". Empty = the default final output. '
+                        'Several layers are normed individually and concatenated, '
+                        'giving 1536 x N dims -- pass the matching --embedding_dim '
+                        'to run.py. ESM3-small has 48 blocks; "48" reproduces the '
+                        'default path exactly.')
     p.add_argument('--layer', type=int, default=0,
                    help='Extract from transformer block N (1-indexed) instead of '
                         'the final output. 0 = default/final, identical to the '
@@ -468,7 +503,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     generate(args.data_file, args.structures_dir, args.out_dir, args.no_structure,
              not args.no_sasa, args.plddt, args.ss8, args.limit, args.max_struct_len,
-             args.gpu_max_len, args.layer)
+             args.gpu_max_len, _parse_layers(args))
 
 
 if __name__ == '__main__':
