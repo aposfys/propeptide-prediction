@@ -290,8 +290,16 @@ on 20/20 sampled sequences.
 
 | layer | peak val | test F1 | behaviour |
 |---|---|---|---|
-| **48** (final) | **0.7045** | **0.5547** | diverges at ep 22 |
+| **48** (final) | 0.7045 | **0.5547** | diverges at ep 22 |
+| 44 | **0.7064** | 0.5388 | diverges at ep 28 |
 | 30 | 0.6558 | 0.5351 | never diverges — 47 stable epochs |
+
+Layers 44 and 48 are indistinguishable, and revealingly the two partitions rank them
+**oppositely**: validation favours 44 by 0.0019, test favours 48 by 0.0159. Both margins sit
+well inside the ~0.03 run-to-run spread of unseeded training. Reported as a negative
+control, not a selection procedure: layer 48 was the a-priori choice, fixed before the sweep
+as the analogue of ESM-2's layer 33, and the sweep asked only whether another layer beats
+it. It does not.
 
 **Layer 48 is ESM3's best, as layer 33 is ESM-2's.** Both models are read at their final
 layer, both by measurement rather than assumption, so the comparison is fair in this
