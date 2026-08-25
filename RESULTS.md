@@ -440,13 +440,36 @@ Setup: LoRA r=8 α=16 on the last 12 blocks (2.36M trainable, 0.17% of 1.4B), he
 AdamW, effective batch 72 by accumulation, length-bucketed, `max_len` 2048, bf16 autocast
 on the encoder only (the CRF's log-space DP stays fp32), seeded.
 
-| run | test F1 | P | R | best val | epoch |
+| run | test F1 | P | R | best val | diverged |
 |---|---|---|---|---|---|
-| `ft_b12_lr5e-5` | **0.5920** | 0.6550 | 0.5401 | 0.7292 | 19 |
-| `ft_frozen_control` | 0.5316 | 0.7312 | 0.4176 | 0.6590 | 10 |
+| `ft_b12_lr5e-5` | 0.5920 | 0.6550 | 0.5401 | **0.7292** | never |
+| `ft_b12_lr1e-4` | **0.6080** | 0.6317 | 0.5859 | 0.7226 | ~ep 22 |
+| `ft_b12_lr3e-4` | 0.5972 | 0.6361 | 0.5627 | 0.7209 | ~ep 16 |
+| **mean over the sweep** | **0.5991 ± 0.0081** | | | | |
+| `ft_frozen_control` | 0.5316 | 0.7312 | 0.4176 | 0.6590 | never |
+
+**The result does not depend on the learning rate.** Across a 6× LR range, test F1 varies by
+0.016 — a spread of 0.0081, less than half the frozen arm's σ of 0.0185. All three beat the
+frozen control by 3–4σ (+0.060, +0.076, +0.066), and by +0.079 against the frozen replicate
+mean of 0.5203.
 
 Val 0.7292 is the highest any ESM3 model has reached in this project (previous best 0.7064)
 and exceeds the archived ESM-2 propeptide validation (0.6930, `esm2_prop_lr5e4`).
+
+**Recall inverted.** 0.4176 frozen → 0.540–0.586 adapted, against ESM-2's 0.4950. The deficit
+that characterised every frozen ESM3 run is gone; precision fell 0.076–0.099 in exchange.
+
+**Divergence costs nothing here.** 1e-4 and 3e-4 both collapsed to `nan`-scale losses (epoch
+22 and 16), and both still scored *above* the stable 5e-5 run — best-on-validation
+checkpointing captures the peak before the collapse. Divergence timing scales cleanly with
+the adapter LR: never / ~22 / ~16.
+
+⚠ **On selecting a configuration.** By validation — the correct criterion — the ranking is
+5e-5 (0.7292) > 1e-4 (0.7226) > 3e-4 (0.7209), so the properly selected run is 5e-5 and its
+test number is **0.5920**, a gap of 0.039 to ESM-2. Quoting 0.6080 because it is the highest
+of three *test* scores is selection on the test set. The validation margins (0.0066 across
+all three) are far inside noise, so validation is not actually resolving them — which is
+what per-seed replicates would fix.
 
 Four ESM3-specific facts had to be right, each verified against `esm 3.2.1` rather than
 inferred, and two of them break a naive script:
