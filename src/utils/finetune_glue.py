@@ -48,7 +48,7 @@ class SequenceCRFDataset(Dataset):
     `measure_performance.py` work unchanged.
     '''
 
-    def __init__(self, data_file, partitioning_file, partitions=(0,), max_len: int = 1024):
+    def __init__(self, data_file, partitioning_file, partitions=(0,), max_len: int = 2048):
         super().__init__()
         data = pd.read_csv(data_file, index_col='protein_id')
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
@@ -72,17 +72,39 @@ class SequenceCRFDataset(Dataset):
         self.lengths = [min(len(s), max_len) for s in self.sequences]
         self.n_cropped = sum(1 for s in self.sequences if len(s) > max_len)
 
+        # Scoring truth is never cropped, so a propeptide past the crop is an
+        # unavoidable false negative. Report it rather than let it sit unnoticed
+        # in the recall. At max_len=2048 this is 0 on valid and test; at 1024 it
+        # is 11 on test, worth -0.0027 F1 -- and those 11 are almost all
+        # C-terminal propeptides of long precursors, a biological class rather
+        # than a random slice.
+        self.n_unreachable = sum(1 for segs, seq in zip(propeptides, self.sequences)
+                                 for (_, e) in segs if e > min(len(seq), max_len))
+        n_total = sum(len(x) for x in propeptides)
+        if self.n_unreachable:
+            print(f'  [SequenceCRFDataset] max_len={max_len}: {self.n_unreachable}/{n_total} '
+                  f'propeptide segments lie beyond the crop and cannot be predicted '
+                  f'(recall ceiling {100 * (1 - self.n_unreachable / max(n_total, 1)):.2f}%)')
+
     def __len__(self) -> int:
         return len(self.names)
 
     def __getitem__(self, index: int):
         seq = self.sequences[index][: self.max_len]
         propeptides = self.propeptides[index]
-        # Cropping can truncate a propeptide that starts past max_len; keep only
-        # segments fully inside the crop so labels and sequence stay consistent.
-        if len(self.sequences[index]) > self.max_len:
-            propeptides = [(s, e) for (s, e) in propeptides if e <= self.max_len]
-        label = peptide_list_to_label_sequence(propeptides, len(seq), start_state=1, max_len=50)
+
+        # Two different croppings, deliberately:
+        #   label_segments -- cropped. The CRF can only emit states for residues
+        #                     that exist, so the label tensor must match the crop.
+        #   propeptides    -- NOT cropped. This is the scoring truth, and it is
+        #                     the same list held in self.data['true_propeptides']
+        #                     that compute_all_metrics reads. Cropping it here
+        #                     would make the two paths disagree about ground
+        #                     truth, and would delete exactly the hardest cases
+        #                     from the denominator if the metric were ever
+        #                     rewired to read it.
+        label_segments = [(s, e) for (s, e) in propeptides if e <= len(seq)]
+        label = peptide_list_to_label_sequence(label_segments, len(seq), start_state=1, max_len=50)
         return seq, torch.from_numpy(label), propeptides
 
     @staticmethod

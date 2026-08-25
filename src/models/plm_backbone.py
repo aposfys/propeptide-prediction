@@ -182,8 +182,10 @@ class PLMBackbone(nn.Module):
         n_lora_blocks: adapt the last N blocks. 0 = fully frozen, which
                     reproduces the existing precomputed-embedding pipeline on
                     the fly and is the control every sweep should carry.
-        max_len: crop longer sequences. p99 of this dataset is 1,156 aa and only
-                    1.6% of sequences exceed 1,022, so 1,024 loses very little.
+        max_len: crop longer sequences. 2,048 leaves ZERO unreachable
+                    propeptides on valid and test; 1,024 would cost -0.0027 F1 and
+                    would preferentially delete C-terminal propeptides of long
+                    precursors, a biological class rather than a random slice.
         dtype: float32 by default and deliberately so. `ESM3.from_pretrained`
                     yields bfloat16 on CUDA and float32 on CPU, which silently
                     changes numerics between machines -- the trap documented in
@@ -201,7 +203,7 @@ class PLMBackbone(nn.Module):
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
         grad_checkpoint: bool = True,
-        max_len: int = 1024,
+        max_len: int = 2048,
         device: torch.device | str = 'cuda',
         dtype: torch.dtype = torch.float32,
     ):
