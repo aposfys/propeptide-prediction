@@ -190,22 +190,32 @@ class FineTunedCRF(nn.Module):
     rather than a matter of feature scale.
     '''
 
-    def __init__(self, backbone, head, normalize_input: bool = True):
+    def __init__(self, backbone, head, normalize_input: bool = True,
+                 autocast_backbone: bool = True):
         super().__init__()
         self.backbone = backbone
         self.input_norm = nn.LayerNorm(backbone.d_model) if normalize_input else nn.Identity()
         self.head = head
+        self.autocast_backbone = autocast_backbone
 
     def forward(self, sequences: List[str], labels=None, skip_marginals: bool = True,
-                use_focal: bool = False):
-        reps, mask = self.backbone(sequences)          # (B, L, D), (B, L)
-        reps = self.input_norm(reps)
+                use_focal: bool = False, skip_decode: bool = False):
+        # Autocast wraps ONLY the encoder. The CRF's forward algorithm and
+        # Viterbi are log-space dynamic programming over 51 states, where bf16's
+        # 8-bit mantissa loses far too much; reps are cast back to fp32 before
+        # the head sees them. Doing this here rather than at the call site means
+        # no caller can accidentally put the CRF inside an autocast region.
+        use_ac = self.autocast_backbone and torch.cuda.is_available()
+        with torch.autocast('cuda', dtype=torch.bfloat16, enabled=use_ac):
+            reps, mask = self.backbone(sequences)      # (B, L, D), (B, L)
+        reps = self.input_norm(reps.float())
         embeddings = reps.permute(0, 2, 1)             # head expects (B, D, L)
         if labels is not None:
             labels = align_labels(labels, mask)
-        # The CRF's forward algorithm and Viterbi are log-space dynamic
-        # programming over 51 states; bf16 loses too much mantissa there. Cast
-        # emissions back to fp32 by keeping the head outside any autocast region
-        # at the call site, or wrap only the backbone.
-        return self.head(embeddings, mask, labels,
-                         skip_marginals=skip_marginals, use_focal=use_focal)
+        kwargs = dict(skip_marginals=skip_marginals, use_focal=use_focal)
+        # skip_decode exists on the GPU branch's CRF and skips a Viterbi
+        # backtrace that training discards -- a per-timestep Python loop of
+        # .item() calls, i.e. thousands of blocking CUDA syncs per batch.
+        if skip_decode:
+            kwargs['skip_decode'] = True
+        return self.head(embeddings, mask, labels, **kwargs)
