@@ -161,6 +161,23 @@ def build_model(args, device) -> FineTunedCRF:
                         autocast_backbone=not args.no_autocast).to(device)
 
 
+def adapter_state_dict(model: FineTunedCRF) -> dict:
+    '''Everything that can change, and nothing that cannot.
+
+    A full state_dict here is 5.5 GB, because 1.376B of the 1.376B parameters
+    are the frozen pretrained encoder -- redundant with the HuggingFace weights
+    and rewritten on every improving epoch. This keeps the head, the input
+    LayerNorm and the LoRA A/B matrices: ~2 MB for the frozen control, ~12 MB at
+    r=8 on 12 blocks.
+
+    Selection is structural rather than by requires_grad, because during the
+    head-only warm start the adapters are temporarily frozen and would
+    otherwise be dropped from the checkpoint.
+    '''
+    return {k: v for k, v in model.state_dict().items()
+            if (not k.startswith('backbone.plm.')) or ('lora_' in k)}
+
+
 def set_adapters_trainable(model: FineTunedCRF, flag: bool) -> int:
     n = 0
     for name, prm in model.named_parameters():
@@ -265,7 +282,7 @@ def main() -> None:
         improved = score > best
         if improved:
             best = score
-            torch.save(model.state_dict(), ckpt)
+            torch.save(adapter_state_dict(model), ckpt)
             json.dump({**vm, 'epoch': epoch},
                       open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
             patience_counter = 0
@@ -282,7 +299,16 @@ def main() -> None:
             print(f'  Early stopping at epoch {epoch+1} (patience={args.patience}).')
             break
 
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    # strict=False: the checkpoint deliberately omits the frozen encoder, which
+    # is already in memory from from_pretrained. Assert nothing unexpected is
+    # missing rather than trusting the flag.
+    missing, unexpected = model.load_state_dict(
+        torch.load(ckpt, map_location=device), strict=False)
+    assert not unexpected, f'unexpected keys in checkpoint: {unexpected[:5]}'
+    assert all(k.startswith('backbone.plm.') and 'lora_' not in k for k in missing), (
+        f'checkpoint is missing trainable parameters: '
+        f'{[k for k in missing if not k.startswith("backbone.plm.")][:5]}'
+    )
     tm = evaluate(model, eval_loaders['test'], sets['test'])
     json.dump(tm, open(os.path.join(args.out_dir, 'test_metrics.json'), 'w'), indent=2)
     print('\n=== test ===')
