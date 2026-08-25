@@ -338,3 +338,42 @@ def summarise(model: nn.Module) -> str:
     lora = sum(p.numel() for n, p in model.named_parameters() if 'lora_' in n and p.requires_grad)
     return (f'trainable {tr:,} / {tot:,} ({100 * tr / tot:.3f}%) '
             f'| lora {lora:,} | head {tr - lora:,}')
+
+
+def check_batch_invariance(backbone, sequences: List[str], atol: float = 1e-4) -> dict:
+    '''Does a padded batch give the same representations as one sequence at a time?
+
+    The cached-embedding pipeline embedded each sequence ALONE, with no padding.
+    This one batches and pads and relies on `sequence_id` to stop residues from
+    attending to pad tokens. If that masking is wrong, every downstream number is
+    contaminated -- and neither --no_input_norm nor --no_autocast would reveal
+    it, because both arms would be equally contaminated.
+
+    Run in fp32 (no autocast) so a failure means a masking bug rather than bf16
+    reduction noise, and pass a length-varied sample so the padding is
+    non-trivial. Two minutes, no training.
+    '''
+    was_training = backbone.training
+    backbone.eval()
+    per_seq, worst = [], 0.0
+    with torch.no_grad():
+        batched, mask = backbone(sequences)
+        for i, seq in enumerate(sequences):
+            solo, _ = backbone([seq])
+            n = min(solo.shape[1], int(mask[i].sum().item()))
+            d = (batched[i, :n] - solo[0, :n]).abs().max().item()
+            per_seq.append((len(seq), d))
+            worst = max(worst, d)
+    if was_training:
+        backbone.train()
+
+    ok = worst <= atol
+    lo = min(l for l, _ in per_seq)
+    hi = max(l for l, _ in per_seq)
+    print(f'  batch-invariance: max|batched - solo| = {worst:.3e} over '
+          f'{len(sequences)} sequences (lengths {lo}-{hi}) -> {"PASS" if ok else "FAIL"}')
+    if not ok:
+        for L, d in sorted(per_seq, key=lambda x: -x[1])[:5]:
+            print(f'      len {L:5d}  max delta {d:.3e}')
+        print('      => padding is leaking into attention; fix before trusting any run.')
+    return {'ok': ok, 'max_abs_diff': worst, 'per_sequence': per_seq}
