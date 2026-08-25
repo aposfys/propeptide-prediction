@@ -70,9 +70,14 @@ All numbers at **±3-residue boundary tolerance**, single Graph-Part split on th
 
 **No run is seeded.** Upstream DeepPeptide seeds nothing (`git grep -ni manual_seed upstream/main`
 returns no matches) and this branch matches it, so every row is a single draw from a different
-random initialisation and shuffle order. Differences below ~0.03 F1 should not be read as real
-until replicates land. Replicates, not seeding, are the upstream-faithful remedy — the paper's
-headline uses a 20-model ensemble (Figure S4).
+random initialisation and shuffle order. That spread is now **measured, not assumed**: fifteen
+replicates of one configuration give **sd 0.0185** (see the headline section), so a single-run
+difference below ~0.037 (2σ) should not be read as real. Replicates, not seeding, are the
+upstream-faithful remedy — the paper's headline uses a 20-model ensemble (Figure S4).
+
+The fine-tuning arm (`finetune.py`) is the exception and seeds deliberately: adapting the
+encoder adds its own initialisation noise on top of the head's, and the seed is recorded in
+each run's `config.json`.
 
 Metric note: propeptide-only models use the **corrected** boundary-matching metric
 (`get_counts_for_protein` fix). The joint-model rows carry the original per-run scoring; the
@@ -129,24 +134,58 @@ No run is seeded, matching upstream.
 
 ## Headline result
 
-**ESM-2 outperforms ESM3 by 0.076 F1**, after ESM3 was given an optimisation sweep,
-a hyperparameter search and a layer sweep that ESM-2 never received:
-
 | embedder | run | P | R | **test F1** |
 |---|---|---|---|---|
-| ESM-2 (650M) | `esm2_prop_T4_test` | — | — | **0.6307** |
-| ESM3 (1.4B, repaired) | `esm3_T4_b70_wd` | 0.7054 | 0.4570 | 0.5547 |
+| ESM-2 (650M), frozen | `esm2_prop_T4_test` | — | — | **0.6307** |
+| **ESM3 (1.4B), LoRA fine-tuned** | `ft_b12_lr5e-5` | 0.6550 | **0.5401** | **0.5920** |
+| ESM3 (1.4B), frozen — replicate mean (n=15) | `esm3_ens/model_*` | — | — | 0.5203 ± 0.0185 |
+| ESM3 (1.4B), frozen — frozen control, FT code path | `ft_frozen_control` | 0.7312 | 0.4176 | 0.5316 |
 
-At matched Table S1 settings the gap is larger — 0.6307 vs 0.5270 (`esm3_prop_T4_normed`),
-0.104. Tuning ESM3 narrowed it to 0.076; see "ESM3 optimisation sweep" below.
+**Frozen ESM-2 still leads, by 0.039 (2.1σ).** But fine-tuning closed most of the gap:
+from 0.110 against the frozen replicate mean to 0.039, and ESM3+LoRA now beats one ESM-2
+configuration outright (`esm2_prop_lr5e4`, 0.5711).
 
-**Caveat to state in any write-up**: ESM-2 has only ever been run at Table S1 defaults
-(batch 20, no weight decay). The batch-size and weight-decay treatment that lifted ESM3
-from 0.5270 to 0.5547 has not been applied to ESM-2, and would likely lift it too. The
-honest reading is that 0.076 is a *lower bound* on the gap.
+### The run-to-run spread is 0.0185, measured
 
-The gap is roughly 3× the ~0.03 run-to-run spread expected from unseeded training, so
-replicates are unlikely to overturn it. Three protocols agree on the direction:
+Fifteen replicates of `esm3_T4_b70_wd`'s exact configuration, differing only in random
+initialisation: **mean 0.5203, sd 0.0185, min 0.4881, max 0.5445.**
+
+Two consequences, both of which change earlier readings in this file:
+
+1. **The 0.5547 previously headlined here is a fortunate draw.** It sits *above the
+   maximum of fifteen replicates of its own configuration*. It was selected as the best of
+   ~20 configs, and that selection inflated it by roughly two standard deviations. ESM3's
+   honest frozen number is **0.5203 ± 0.0185**.
+2. Earlier text assumed a ~0.03 spread. The measured value is smaller, so margins are
+   more significant than previously stated — a single-run difference needs ~0.037 (2σ).
+
+### Fine-tuning: +0.060 over its own control, entirely in recall
+
+| | test F1 | P | R |
+|---|---|---|---|
+| ESM3 + LoRA (12 blocks, r=8, lr 5e-5) | **0.5920** | 0.6550 | 0.5401 |
+| ESM3 frozen, same code path | 0.5316 | 0.7312 | 0.4176 |
+| | **+0.0604 (3.3σ)** | −0.076 | **+0.123** |
+
+Every frozen ESM3 result in this project lost on recall at high precision. Fine-tuning
+traded 0.076 of precision for 0.123 of recall. ESM3+LoRA's recall (0.5401) now **exceeds
+ESM-2's** (0.4950 for `esm2_prop_lr5e4`) — the first time that has happened.
+
+**The comparison is LoRA-adapted ESM3 vs frozen ESM-2, and every caption must say so.**
+ESM-2 has had neither adapters nor the batch/weight-decay treatment. The experiment asks
+whether adaptation closes a measured representation gap, not which encoder wins outright.
+
+⚠ σ = 0.0185 was measured on the *frozen* configuration. The adapted arm's own spread is
+unmeasured, and adapters could plausibly add variance. Replicates before any final claim.
+
+### The fine-tuning path is validated
+
+`ft_frozen_control` (`--lora_blocks 0`) runs the identical code path with no adapters:
+**0.5316** against the cached-embedding pipeline's **0.5280** at the same configuration —
+a difference of 0.0036, 0.19σ, with recall matching to four decimal places. So
+tokenisation, padding, the residue mask, the input LayerNorm, `max_len=2048` and bf16
+autocast together shifted the result by less than a fifth of the noise floor, and any
+difference the adapters produce is attributable to the adapters. Three protocols agree on the direction:
 
 | protocol | ESM-2 | ESM3 |
 |---|---|---|
@@ -253,8 +292,13 @@ Table S1's batch 20 explodes to `nan`; the epoch it survives to tracks batch siz
 |---|---|---|---|
 | T4, batch 20, wd 0 | 12 | 0.7000 | 0.5280 |
 | T4, batch 20, wd 1e-4 | 6 | 0.6814 | — |
-| **T4, batch 70, wd 1e-4** | **21** | **0.7045** | **0.5547** |
+| **T4, batch 70, wd 1e-4** | **21** | **0.7045** | **0.5547** ⚠ |
 | T4, batch 100, wd 1e-4 | 35 | 0.6979 | 0.5246 |
+
+⚠ 0.5547 is an outlier, not this configuration's expected value. Fifteen replicates of it
+give mean 0.5203, sd 0.0185, **max 0.5445** — 0.5547 exceeds all fifteen. Selecting the best
+of ~20 configurations inflated it by roughly 2σ. Use 0.5203 ± 0.0185 as the frozen-ESM3
+number and treat the rows below as single draws from that distribution.
 
 Weight decay is worth ~+0.026 at matched settings (0.4911 → 0.5167 on the tuned
 architecture) and, combined with batch 70, delays divergence from epoch 6 to epoch 22.
@@ -296,7 +340,7 @@ on 20/20 sampled sequences.
 
 Layers 44 and 48 are indistinguishable, and revealingly the two partitions rank them
 **oppositely**: validation favours 44 by 0.0019, test favours 48 by 0.0159. Both margins sit
-well inside the ~0.03 run-to-run spread of unseeded training. Reported as a negative
+well inside the measured run-to-run spread (sd 0.0185, n=15). Reported as a negative
 control, not a selection procedure: layer 48 was the a-priori choice, fixed before the sweep
 as the analogue of ESM-2's layer 33, and the sweep asked only whether another layer beats
 it. It does not.
@@ -385,10 +429,49 @@ allocates an L×L×heads×3 tensor whether or not coordinates are passed — 37.
 L≈3,600, which OOMs a 31 GB card. The 15 sequences over 2,000 residues were embedded on
 CPU (`--gpu_max_len 2000`), giving identical float32 output.
 
+## Fine-tuning ESM3 (branch `esm3-multimodal-propeptide`)
+
+Every ESM3 number above measures **frozen-feature quality** through a ~458k-parameter head.
+No ESM3 parameter had ever been trained on this task, so "does ESM3 improve when its
+parameters are allowed to move" had never been asked. `finetune.py` asks it.
+
+Setup: LoRA r=8 α=16 on the last 12 blocks (2.36M trainable, 0.17% of 1.4B), head LR
+5.5e-3 with adapters two orders below, 3-epoch head-only warm start, 5% linear warmup,
+AdamW, effective batch 72 by accumulation, length-bucketed, `max_len` 2048, bf16 autocast
+on the encoder only (the CRF's log-space DP stays fp32), seeded.
+
+| run | test F1 | P | R | best val | epoch |
+|---|---|---|---|---|---|
+| `ft_b12_lr5e-5` | **0.5920** | 0.6550 | 0.5401 | 0.7292 | 19 |
+| `ft_frozen_control` | 0.5316 | 0.7312 | 0.4176 | 0.6590 | 10 |
+
+Val 0.7292 is the highest any ESM3 model has reached in this project (previous best 0.7064)
+and exceeds the archived ESM-2 propeptide validation (0.6930, `esm2_prop_lr5e4`).
+
+Four ESM3-specific facts had to be right, each verified against `esm 3.2.1` rather than
+inferred, and two of them break a naive script:
+
+- LoRA targets are `attn.layernorm_qkv.1`, `attn.out_proj`, `ffn.1`, `ffn.3`. In ESM3
+  `layernorm_qkv` and `ffn` are `nn.Sequential`, so the ESM-2 idiom
+  `target_modules=['layernorm_qkv']` matches a container and attaches nothing.
+- Geometric attention runs in block 0 unconditionally and allocates an L×L×heads tensor
+  whether or not structure is passed. For sequence-only input it contributes exactly zero,
+  so `use_geom_attn = False` is bit-exact and frees 3.0 GiB at L=1024 — the fix that
+  retires the `--gpu_max_len` CPU fallback.
+- The tokenizer emits `input_ids`, not `sequence_tokens` (that is the name of ESM3's
+  *forward argument*), and it **right-pads** — so a residue mask taken as
+  `attention_mask[:, 1:-1]` marks each short sequence's EOS as a valid residue. The mask is
+  built from true sequence lengths.
+- `ESM3.from_pretrained` returns bfloat16 on CUDA and float32 on CPU. Master weights are
+  forced to fp32 so the frozen control stays numerically comparable to the cached runs.
+
 ## Queued runs
 
 | run | purpose |
 |---|---|
+| `ft_b12_lr1e-4`, `ft_b12_lr3e-4` | the rest of the LoRA learning-rate sweep |
+| replicates of the winning LoRA config | σ=0.0185 is the FROZEN arm's spread; the adapted arm's is unmeasured, and the headline claim rests on it |
+| ESM-2 + batch 70 + weight decay | ESM-2 has only ever run at Table S1 defaults; the comparison is asymmetric until it gets the same treatment |
 | `esm2_full_T4` | ESM-2 joint model — `esm3_full_T4_normed` is uninterpretable without it, since the archived `esm2_T4` predates the metric fix and real gradient clipping |
 | `esm3_prop_T4_normed_rep2`, `_rep3` | replicates of the ESM3 number, for an error bar |
 | `esm2_prop_T4_test_rep2` | replicate of the **winning** row — worth more than a second draw of the loser |
