@@ -23,14 +23,35 @@ WHAT IS AVERAGED
 
 Identical to ensemble_predict.py:
 
-  * the 2-logit emissions from head.features_to_emissions, averaged as
-    log-softmax -- a product of experts, the standard combination for
-    log-linear models like a CRF. Averaging raw logits would let one
-    over-confident member dominate.
+  * the 2-logit emissions from head.features_to_emissions, combined under
+    --combine:
+
+      product (default)  mean of the log-softmax. A product of experts, the
+                         standard combination for log-linear models like a CRF.
+                         Averaging raw logits instead would let one
+                         over-confident member dominate.
+      mixture            logsumexp over members minus log n, i.e. the mean of
+                         the PROBABILITIES. A mixture of experts.
+
+    The two differ in who holds the veto. Under a product every member must
+    agree before a peptide state survives, so one confidently wrong member
+    suppresses a call the others make; under a mixture one confident member
+    carries it. That is a precision/recall dial, and the first run of this
+    script showed it pointing the wrong way for this task: the 4-member product
+    scored P 0.7073 / R 0.5190 against members at P 0.632-0.655 / R 0.540-0.586,
+    so precision came in ABOVE every member and recall BELOW every member. F1
+    here is recall-limited, so that trade loses -- the ensemble landed at 0.5987,
+    under its own best member's 0.6080.
+
+    Which rule to use is an open question per task, so pick it on VALIDATION
+    (--partition 3) and report the winner on test. Choosing it by test F1 is
+    selection on the test set and is not quotable.
   * the CRF's transitions / start_transitions / end_transitions, averaged
-    directly. Low-dimensional, structurally identical across members (same
-    allowed-transition mask), and log-potentials, so an arithmetic mean is again
-    a product of experts.
+    arithmetically under BOTH rules. Low-dimensional, structurally identical
+    across members (same allowed-transition mask), and log-potentials, so an
+    arithmetic mean is a product of experts. --combine names a rule for the
+    emissions only; see the note at the averaging site for why a mixture over
+    transitions is not a thing this script can compute.
 
 The encoder is NOT averaged. Each member runs its own forward pass with its own
 adapters, and only the outputs are combined. Averaging LoRA weights across
@@ -49,6 +70,7 @@ are cached on the HPC, so replicates there are cheap.
 import argparse
 import glob
 import json
+import math
 import os
 from types import SimpleNamespace
 
@@ -114,6 +136,18 @@ def main():
     p.add_argument('--num_workers', type=int, default=2)
     p.add_argument('--num_cpu_threads', type=int, default=0)
     p.add_argument('--tolerance', type=int, default=3)
+    p.add_argument('--combine', choices=('product', 'mixture'), default='product',
+                   help='product: mean of log-probs (every member holds a veto). '
+                        'mixture: mean of probs (one confident member carries a call, '
+                        'so recall is higher). Pick on validation, report on test.')
+    p.add_argument('--partition', type=int, default=4,
+                   help='4 = test (default), 3 = validation. Use 3 to choose --combine '
+                        'and --min_val_f1 without touching the test set.')
+    p.add_argument('--min_val_f1', type=float, default=0.0,
+                   help="Drop members whose own valid_metrics.json F1 is below this. "
+                        'Screening on validation is legitimate model selection; screening '
+                        'on test_metrics.json would not be, which is why this reads the '
+                        'validation file only.')
     args = p.parse_args()
 
     if args.num_cpu_threads:
@@ -122,6 +156,24 @@ def main():
     run_dirs = sorted(glob.glob(args.runs))
     if len(run_dirs) < 2:
         raise SystemExit(f'{args.runs} matched {len(run_dirs)} run(s); need at least 2.')
+
+    if args.min_val_f1 > 0:
+        kept = []
+        for d in run_dirs:
+            v = os.path.join(d, 'valid_metrics.json')
+            if not os.path.isfile(v):
+                raise SystemExit(f'--min_val_f1 needs {v}, which does not exist.')
+            f1 = json.load(open(v))['f1 propeptides']
+            if f1 >= args.min_val_f1:
+                kept.append(d)
+            else:
+                print(f'  dropped {os.path.basename(d):24} val F1 {f1:.4f} '
+                      f'< {args.min_val_f1}')
+        if len(kept) < 2:
+            raise SystemExit(f'--min_val_f1 {args.min_val_f1} left {len(kept)} member(s); '
+                             'need at least 2.')
+        run_dirs = kept
+
     cfgs = load_configs(run_dirs)
     ref = cfgs[0]
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -131,7 +183,8 @@ def main():
     # shuffle=False: compute_all_metrics pairs predictions in LOADER order with
     # names in DATASET order, positionally. Any permutation here silently
     # mismatches every protein.
-    ds = SequenceCRFDataset(ref['data_file'], ref['partitioning_file'], (4,), ref['max_len'])
+    ds = SequenceCRFDataset(ref['data_file'], ref['partitioning_file'],
+                            (args.partition,), ref['max_len'])
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         collate_fn=SequenceCRFDataset.collate_fn,
                         num_workers=args.num_workers)
@@ -168,12 +221,27 @@ def main():
         else:
             if len(batch_em) != n_batches:
                 raise SystemExit(f'{d} produced {len(batch_em)} batches, expected {n_batches}.')
-            summed = [s + e for s, e in zip(summed, batch_em)]
+            # Both rules accumulate in log space and stream, so peak memory is one
+            # member's emissions regardless of how many members are combined.
+            # logaddexp is the numerically stable running logsumexp.
+            summed = [s + e for s, e in zip(summed, batch_em)] if args.combine == 'product' \
+                else [torch.logaddexp(s, e) for s, e in zip(summed, batch_em)]
         print(f'  [{i}/{len(run_dirs)}] {os.path.basename(d)}')
 
     n = len(run_dirs)
-    averaged = [s / n for s in summed]
+    # product: mean of log-probs. mixture: log of the mean of probs.
+    # Both are shifted by a constant per position, which Viterbi is invariant to;
+    # the shift is kept anyway so the emissions stay interpretable as log-probs.
+    averaged = [s / n for s in summed] if args.combine == 'product' \
+        else [s - math.log(n) for s in summed]
     with torch.no_grad():
+        # Transitions are averaged arithmetically under BOTH rules. --combine
+        # names a rule for the emissions only: a mixture over full label paths
+        # is not the mixture of per-position transition matrices, and computing
+        # it properly means decoding each member separately and combining paths,
+        # which is a different algorithm. The transition matrices are also near
+        # identical across members (same allowed-transition mask, all members
+        # from the same init), so this choice moves almost nothing.
         for key, tot in crf_sum.items():
             getattr(model.head.crf, key).copy_(tot / n)
 
@@ -192,13 +260,18 @@ def main():
     metrics = compute_all_metrics(None, preds, None, ds.names, ds.data,
                                   windows=[args.tolerance])[0]
 
+    # Compare against the members' scores on the SAME partition, so a validation
+    # run is not silently benchmarked against test numbers.
+    member_file = 'test_metrics.json' if args.partition == 4 else 'valid_metrics.json'
     singles = []
     for d in run_dirs:
-        t = os.path.join(d, 'test_metrics.json')
+        t = os.path.join(d, member_file)
         if os.path.isfile(t):
             singles.append(json.load(open(t))['f1 propeptides'])
 
-    print(f'\n=== {n}-member ensemble, +/-{args.tolerance} tolerance ===')
+    split = {4: 'test', 3: 'validation'}.get(args.partition, f'partition {args.partition}')
+    print(f'\n=== {n}-member {args.combine} ensemble on {split}, '
+          f'+/-{args.tolerance} tolerance ===')
     for k, v in metrics.items():
         print(f'  {k:26} {v:.4f}')
     if singles:
@@ -208,7 +281,9 @@ def main():
         print(f'  ensemble gain over the best: {metrics["f1 propeptides"] - max(singles):+.4f}')
 
     if args.out_json:
-        json.dump({**metrics, 'n_members': n, 'member_f1': singles},
+        json.dump({**metrics, 'n_members': n, 'member_f1': singles,
+                   'combine': args.combine, 'partition': args.partition,
+                   'members': [os.path.basename(d) for d in run_dirs]},
                   open(args.out_json, 'w'), indent=2)
         print(f'\nwritten to {args.out_json}')
 
