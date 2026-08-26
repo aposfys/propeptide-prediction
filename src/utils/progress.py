@@ -155,14 +155,23 @@ def main():
     groups = [(k, v) for k, v in done.items() if k is not None and len(v) > 1]
     if groups:
         print()
+        # Label each group by the keys that actually DIFFER between groups. A
+        # fixed template printed 'lr=0.0055 finetuned' for two different LoRA
+        # groups and 'lr=0.0055 esm2' for two different ESM-2 groups -- identical
+        # labels on distinct experiments, which is how numbers end up attributed
+        # to the wrong recipe in a write-up.
+        # embeddings_dir is skipped: its basename is already the first token of
+        # every label, so repeating it in full only adds width.
+        varying = [k for k in GROUP_KEYS
+                   if k != 'embeddings_dir'
+                   and len({dict(key).get(k) for key, _ in groups}) > 1]
         for key, runs in sorted(groups, key=lambda kv: -len(kv[1])):
             f1s = [f for _, f in runs]
             cfg = dict(key)
-            # Built outside the f-string: a multi-line expression inside one is
-            # only legal from Python 3.12 (PEP 701), and this has to run on the
-            # cluster env too.
             emb = os.path.basename(str(cfg.get('embeddings_dir', '')).rstrip('/'))
-            label = 'lr={} {}'.format(cfg.get('lr'), emb or 'finetuned')
+            parts = [emb or 'finetuned']
+            parts += ['{}={}'.format(k, cfg[k]) for k in varying if k in cfg]
+            label = ' '.join(parts)
             members = ', '.join(n for n, _ in sorted(runs))
             print(f'{len(runs)} replicates of [{label}]: mean {statistics.mean(f1s):.4f}, '
                   f'sd {statistics.stdev(f1s):.4f}, min {min(f1s):.4f}, max {max(f1s):.4f}')
