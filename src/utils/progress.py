@@ -28,9 +28,31 @@ import json
 import os
 import time
 
+# Scalars carry a wall_time, so a finished run's duration and an in-flight run's
+# seconds-per-epoch are both recoverable from the event file. That makes "how
+# much longer" a measurement on this machine rather than a guess.
+
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 TAG = 'Valid/f1_propeptides'
+
+
+def fmt(seconds):
+    if seconds is None:
+        return '?'
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f'{h}h{m:02d}m' if h else f'{m}m{s:02d}s'
+
+
+def epochs_cap(run_dir):
+    '''max epochs and patience from the run's own config.json, so the ETA uses
+    the settings the run was actually launched with.'''
+    cfg = os.path.join(run_dir, 'config.json')
+    if not os.path.isfile(cfg):
+        return None, None
+    c = json.load(open(cfg))
+    return c.get('epochs'), c.get('patience')
 
 
 def read_scalars(run_dir):
@@ -68,8 +90,11 @@ def main():
             m = json.load(open(test_json))
             f1 = m['f1 propeptides']
             done.append(f1)
+            sc = read_scalars(d)
+            took = fmt(sc[-1].wall_time - sc[0].wall_time) if len(sc) > 1 else '?'
             print(f'{name:24} DONE   test F1 {f1:.4f}   '
-                  f'P {m["precision propeptides"]:.4f}   R {m["recall propeptides"]:.4f}')
+                  f'P {m["precision propeptides"]:.4f}   R {m["recall propeptides"]:.4f}   '
+                  f'[{len(sc)} ep in {took}]')
             continue
 
         scalars = read_scalars(d)
@@ -85,8 +110,22 @@ def main():
         stall = ((time.time() - os.path.getmtime(ckpt)) / 60
                  if os.path.isfile(ckpt) else None)
         stall_s = f'{stall:.0f} min ago' if stall is not None else 'never'
+        eta = ''
+        if len(scalars) > 1:
+            per = (scalars[-1].wall_time - scalars[0].wall_time) / (len(scalars) - 1)
+            cap, pat = epochs_cap(d)
+            left = []
+            if cap:
+                left.append(cap - len(scalars))
+            # Early stopping usually fires first. model.pt's age divided by the
+            # per-epoch time is how many epochs have passed without improving,
+            # so patience minus that is the other candidate for "epochs left".
+            if pat and stall is not None and per > 0:
+                left.append(max(0, pat - round(stall * 60 / per)))
+            if left:
+                eta = f'   ~{fmt(min(left) * per)} left ({fmt(per)}/epoch)'
         print(f'{name:24} epoch {scalars[-1].step + 1:3d}   val_f1 {scalars[-1].value:.4f}   '
-              f'best {best:.4f}   last improved {stall_s}')
+              f'best {best:.4f}   last improved {stall_s}{eta}')
 
     if len(done) > 1:
         import statistics
