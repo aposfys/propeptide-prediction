@@ -158,12 +158,15 @@ def main():
         for key, runs in sorted(groups, key=lambda kv: -len(kv[1])):
             f1s = [f for _, f in runs]
             cfg = dict(key)
-            label = (f'lr={cfg.get("lr")} '
-                     f'{os.path.basename(str(cfg.get("embeddings_dir", "")).rstrip("/"))
-                        or "finetuned"}')
+            # Built outside the f-string: a multi-line expression inside one is
+            # only legal from Python 3.12 (PEP 701), and this has to run on the
+            # cluster env too.
+            emb = os.path.basename(str(cfg.get('embeddings_dir', '')).rstrip('/'))
+            label = 'lr={} {}'.format(cfg.get('lr'), emb or 'finetuned')
+            members = ', '.join(n for n, _ in sorted(runs))
             print(f'{len(runs)} replicates of [{label}]: mean {statistics.mean(f1s):.4f}, '
                   f'sd {statistics.stdev(f1s):.4f}, min {min(f1s):.4f}, max {max(f1s):.4f}')
-            print(f'    {", ".join(n for n, _ in sorted(runs))}')
+            print(f'    {members}')
     singles = sum(len(v) for k, v in done.items() if k is None or len(v) == 1)
     if singles:
         print(f'\n{singles} further finished run(s) are alone in their configuration '
