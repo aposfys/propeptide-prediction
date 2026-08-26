@@ -45,6 +45,24 @@ def fmt(seconds):
     return f'{h}h{m:02d}m' if h else f'{m}m{s:02d}s'
 
 
+# Hyperparameters that make two runs the same experiment. out_dir and seed are
+# excluded deliberately -- differing on those is what makes them REPLICATES
+# rather than different configurations.
+GROUP_KEYS = ('embeddings_dir', 'embedding_dim', 'model', 'lr', 'batch_size',
+              'dropout', 'conv_dropout', 'kernel_size', 'num_filters',
+              'hidden_size', 'weight_decay', 'use_focal', 'epochs', 'patience',
+              'lora_blocks', 'lora_r', 'lora_lr', 'max_len')
+
+
+def config_key(run_dir):
+    '''A hashable identity for the configuration, or None if unknowable.'''
+    cfg = os.path.join(run_dir, 'config.json')
+    if not os.path.isfile(cfg):
+        return None
+    c = json.load(open(cfg))
+    return tuple((k, c[k]) for k in GROUP_KEYS if k in c)
+
+
 def epochs_cap(run_dir):
     '''max epochs and patience from the run's own config.json, so the ETA uses
     the settings the run was actually launched with.'''
@@ -82,19 +100,22 @@ def main():
     if not run_dirs:
         raise SystemExit(f'{args.runs} matched no directories.')
 
-    done = []
+    done = {}
     for d in run_dirs:
         name = os.path.basename(d)
         test_json = os.path.join(d, 'test_metrics.json')
         if os.path.isfile(test_json):
             m = json.load(open(test_json))
             f1 = m['f1 propeptides']
-            done.append(f1)
+            done.setdefault(config_key(d), []).append((name, f1))
             sc = read_scalars(d)
-            took = fmt(sc[-1].wall_time - sc[0].wall_time) if len(sc) > 1 else '?'
+            # No events means the run was trained elsewhere and only its metrics
+            # were copied here; say nothing rather than print '0 ep in ?'.
+            took = (f'   [{len(sc)} ep in {fmt(sc[-1].wall_time - sc[0].wall_time)}]'
+                    if len(sc) > 1 else '')
             print(f'{name:24} DONE   test F1 {f1:.4f}   '
-                  f'P {m["precision propeptides"]:.4f}   R {m["recall propeptides"]:.4f}   '
-                  f'[{len(sc)} ep in {took}]')
+                  f'P {m["precision propeptides"]:.4f}   R {m["recall propeptides"]:.4f}'
+                  f'{took}')
             continue
 
         scalars = read_scalars(d)
@@ -127,11 +148,26 @@ def main():
         print(f'{name:24} epoch {scalars[-1].step + 1:3d}   val_f1 {scalars[-1].value:.4f}   '
               f'best {best:.4f}   last improved {stall_s}{eta}')
 
-    if len(done) > 1:
-        import statistics
-        print(f'\n{len(done)} finished: mean test F1 {statistics.mean(done):.4f}'
-              + (f', sd {statistics.stdev(done):.4f}' if len(done) > 1 else '')
-              + f', min {min(done):.4f}, max {max(done):.4f}')
+    # Aggregate ONLY within a configuration. Averaging across configurations --
+    # ESM-2 next to ESM3 next to ProstT5 -- produces a number that means nothing
+    # and invites being quoted as though it did.
+    import statistics
+    groups = [(k, v) for k, v in done.items() if k is not None and len(v) > 1]
+    if groups:
+        print()
+        for key, runs in sorted(groups, key=lambda kv: -len(kv[1])):
+            f1s = [f for _, f in runs]
+            cfg = dict(key)
+            label = (f'lr={cfg.get("lr")} '
+                     f'{os.path.basename(str(cfg.get("embeddings_dir", "")).rstrip("/"))
+                        or "finetuned"}')
+            print(f'{len(runs)} replicates of [{label}]: mean {statistics.mean(f1s):.4f}, '
+                  f'sd {statistics.stdev(f1s):.4f}, min {min(f1s):.4f}, max {max(f1s):.4f}')
+            print(f'    {", ".join(n for n, _ in sorted(runs))}')
+    singles = sum(len(v) for k, v in done.items() if k is None or len(v) == 1)
+    if singles:
+        print(f'\n{singles} further finished run(s) are alone in their configuration '
+              f'(or have no config.json) -- not aggregated.')
 
 
 if __name__ == '__main__':
