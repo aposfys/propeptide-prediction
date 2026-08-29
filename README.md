@@ -29,13 +29,11 @@ One branch per representation. Each is a complete working copy, not a patch seri
 |---|---|---|
 | `main` | ESM-2, 1280 | propeptide-only — the reference arm |
 | `baseline-upstream` | ESM-2, 1280 | upstream-faithful: joint peptides + propeptides, **upstream metric** |
-| `esm3-propeptide` | ESM3 `esm3_sm_open_v1`, 1536 | propeptide-only |
-| `esm3-multimodal-propeptide` | ESM3 + structure channel, 1536 | propeptide-only; also carries the Optuna / nested-CV machinery |
-| `esm3-propeptide-optuna-gpu` | ESM3, 1536 | propeptide-only, GPU hyperparameter search |
+| `esm3-propeptide` | ESM3 `esm3_sm_open_v1`, 1536 | propeptide-only; also carries the structure channel, LoRA fine-tuning, Optuna / nested CV and the analysis tooling |
 | `esm3-full` | ESM3, 1536 | joint peptides + propeptides |
 | `prost5-propeptide` | ProstT5, 1024 | propeptide-only |
 | `prost5-full` | ProstT5, 1024 | joint peptides + propeptides |
-| `eirini_branch` | ESM-1b | contributed baseline run (propeptide F1 0.371 at ±3) |
+| `archive/eirini-esm1b` | ESM-1b | preserved contribution, not a comparable arm — different code and metric version; its numbers must not be tabulated with the others |
 
 > **Numbers are not interchangeable across branches.** `baseline-upstream` is deliberately
 > scored with the *unfixed* upstream metric so that it reproduces the published DeepPeptide
