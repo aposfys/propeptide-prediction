@@ -1,9 +1,7 @@
 # Propeptide prediction
 
 Predicting propeptide cleavage sites in protein sequences from frozen protein language
-model embeddings.
-
-MSc Bioinformatics thesis (NKUA), built on
+model embeddings, built on
 [DeepPeptide](https://github.com/fteufel/DeepPeptide) (Teufel et al., *Bioinformatics*
 2023, [`btad616`](https://doi.org/10.1093/bioinformatics/btad616)). The point is to compare
 protein language models on one task: same head, same data, same splits, same metric, same
@@ -56,25 +54,6 @@ predicts 1,100 propeptides where there are 1,420 true ones across 1,538 proteins
 Validation F1 peaks near 0.76 around epochs 6–20, after which the run can diverge. The saved
 checkpoint is from the peak.
 
-### Things to keep in mind
-
-**One split, one run, no error bars.** These are single point estimates. This pipeline
-varies enough between repeats that you can't rank two embedding models from one run each.
-The replicated comparison is the actual thesis work; the table above is just the reference
-arm.
-
-**The metric here is fixed, and that changes the numbers.** Upstream
-`get_counts_for_protein` reuses one loop variable across the true and the predicted loop,
-so a matched true peptide gets marked at the prediction's index instead. `groupby('group')`
-drops the resulting row, and a real true positive becomes a false negative. Upstream
-therefore reports recall and F1 too low, and does so more for models that emit more false
-positives. This branch fixes it, and the joint baseline above is re-scored the same way.
-The paper's published numbers use the old version.
-
-**Gradient clipping.** Upstream calls `clip_grad_norm_` before `backward()`, when there are
-no gradients yet, so the clip does nothing and the published models trained unclipped. This
-branch clips.
-
 ## Training
 
 ### 1. Install
@@ -126,47 +105,6 @@ python run.py \
 | `--patience` | 0 | early stopping. 0 turns it off, which is upstream behaviour and the default |
 | `--out_dir` | | checkpoints, metrics, TensorBoard logs |
 
-The model usually reaches its best validation F1 within about 20 epochs and can go to NaN
-later. That's harmless. The checkpoint is only written when validation improves, and once
-validation collapses it never improves again, so `model.pt` holds the pre-divergence best
-whatever the tail does.
-
-You get `model.pt`, `valid_metrics.json`, `test_metrics.json`, `test_outputs.pickle` and
-`valid_outputs.pickle`, plus TensorBoard logs (`tensorboard --logdir <out_dir>`). Test
-metrics at ±3 are written automatically when training ends.
-
-<details>
-<summary>Re-scoring a checkpoint without retraining</summary>
-
-Handy if a run was killed before its test phase, or to re-score with an updated metric.
-
-```python
-import json, torch
-from torch.utils.data import DataLoader
-from src.models.crf_models import LSTMCNNCRF
-from src.utils.dataset import PrecomputedCSVForOverlapCRFDataset
-from src.utils.manuscript_metrics import compute_all_metrics, convert_path_to_peptide_borders
-
-cfg = json.load(open('results/esm2_prop/config.json'))
-m = LSTMCNNCRF(input_size=cfg['embedding_dim'], num_labels=2, num_states=51,
-               n_filters=cfg['num_filters'], hidden_size=cfg['hidden_size'],
-               filter_size=cfg['kernel_size'], dropout_input=cfg['dropout'],
-               dropout_conv1=cfg['conv_dropout'])
-m.load_state_dict(torch.load('results/esm2_prop/model.pt', map_location='cpu')); m.eval()
-
-ds = PrecomputedCSVForOverlapCRFDataset(cfg['embeddings_dir'], cfg['data_file'],
-                                        cfg['partitioning_file'], partitions=[4])
-loader = DataLoader(ds, batch_size=cfg['batch_size'], shuffle=False, collate_fn=ds.collate_fn)
-preds = []
-with torch.no_grad():
-    for emb, mask, label, _ in loader:
-        _, p, _ = m(emb, mask, label, skip_marginals=True); preds.extend(p)
-
-r = compute_all_metrics(None, preds, None, ds.names, ds.data, windows=[3])[0]
-print("test f1_prop=%.4f  P=%.3f  R=%.3f" % (r['f1 propeptides'], r['precision propeptides'], r['recall propeptides']))
-# predicted spans per protein: convert_path_to_peptide_borders(pred, 1, 50, offset=1)
-```
-</details>
 
 ## Predicting on a raw sequence
 
