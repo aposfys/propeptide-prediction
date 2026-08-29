@@ -1,19 +1,46 @@
-# DeepPeptide (ESM-2, propeptide-only)
+# Propeptide prediction
 
-Predicting **propeptide** cleavage sites in protein sequences using ESM-2.
+Predicting **propeptide** cleavage sites in protein sequences from frozen protein
+language model embeddings.
 
-Adapted from the original DeepPeptide (Teufel et al., *Bioinformatics* 2023, `btad616`).
-This branch reduces the original **3-label / 101-state** joint model (peptides **and**
-propeptides) to a **2-label / 51-state** model that predicts **propeptides only**
-(states 1–50; state 0 = background). Mature-peptide coordinates are ignored
-(`true_peptides = []`).
+MSc Bioinformatics thesis (NKUA). The project adapts
+[DeepPeptide](https://github.com/fteufel/DeepPeptide) (Teufel et al., *Bioinformatics*
+2023, [`btad616`](https://doi.org/10.1093/bioinformatics/btad616)) into a controlled
+comparison: architecture, data, splits, metric and training budget are held fixed while
+the frozen input representation is swapped, so that a difference in performance is
+attributable to the representation rather than to the model built around it.
 
-Everything else is kept faithful to the original architecture: ESM-2 embeddings →
-CNN–biLSTM–CNN feature extractor → linear-chain CRF with a duration-encoded state
-grammar (min length 5, max 50), decoded with Viterbi. Constant-LR Adam, no scheduler,
-no early stopping, best-on-validation checkpointing — exactly as upstream. Runs on CPU.
+The original 3-label / 101-state joint model (peptides **and** propeptides) is reduced to
+a 2-label / 51-state model predicting **propeptides only** — states 1–50, state 0 =
+background; mature-peptide coordinates are ignored. Everything else stays faithful to the
+original: embeddings → CNN–biLSTM–CNN → linear-chain CRF with a duration-encoded state
+grammar (length 5–50), Viterbi decoding, constant-LR Adam, no scheduler, best-on-validation
+checkpointing.
 
-Embedder: `esm2_t33_650M_UR50D` (ESM-2, 1280-dim per residue).
+This branch is the **ESM-2** arm (`esm2_t33_650M_UR50D`, 1280-dim per residue). Runs on CPU.
+
+---
+
+## Branches
+
+One branch per representation. Each is a complete working copy, not a patch series.
+
+| branch | representation | scope |
+|---|---|---|
+| `main` | ESM-2, 1280 | propeptide-only — the reference arm |
+| `baseline-upstream` | ESM-2, 1280 | upstream-faithful: joint peptides + propeptides, **upstream metric** |
+| `esm3-propeptide` | ESM3 `esm3_sm_open_v1`, 1536 | propeptide-only |
+| `esm3-multimodal-propeptide` | ESM3 + structure channel, 1536 | propeptide-only; also carries the Optuna / nested-CV machinery |
+| `esm3-propeptide-optuna-gpu` | ESM3, 1536 | propeptide-only, GPU hyperparameter search |
+| `esm3-full` | ESM3, 1536 | joint peptides + propeptides |
+| `prost5-propeptide` | ProstT5, 1024 | propeptide-only |
+| `prost5-full` | ProstT5, 1024 | joint peptides + propeptides |
+| `eirini_branch` | ESM-1b | contributed baseline run (propeptide F1 0.371 at ±3) |
+
+> **Numbers are not interchangeable across branches.** `baseline-upstream` is deliberately
+> scored with the *unfixed* upstream metric so that it reproduces the published DeepPeptide
+> figures like for like. Every other branch corrects that metric (see Caveats), so its
+> values sit on a different footing and must not be tabulated alongside.
 
 ---
 
@@ -27,49 +54,58 @@ kernel 5, filters 48, hidden 48`).
 | model | precision | recall | **F1 (propeptide)** |
 |---|---|---|---|
 | **propeptide-only (this branch)** — ESM-2, T4 | **0.717** | **0.556** | **0.626** |
-| joint peptide+propeptide — ESM-2, T4 (`main`) | 0.685 | 0.527 | 0.596 |
+| joint peptide+propeptide — ESM-2, T4 (`baseline-upstream`) | 0.685 | 0.527 | 0.596 |
 | DeepPeptide paper (propeptides, ±3) | 0.64 | 0.46 | ~0.535 |
 
-**Restricting the model to propeptides improves propeptide detection** over the joint
-model (+0.03 F1, driven mainly by precision) and matches/exceeds the published DeepPeptide
+Restricting the model to propeptides improves propeptide detection over the joint model
+(+0.03 F1, driven mainly by precision) and matches or exceeds the published DeepPeptide
 propeptide numbers. On the test split the model predicts 1,100 propeptides against 1,420
-true ones (1,538 proteins). Validation F1 peaks at ~0.76 around epochs 6–20 before a
-late-training divergence; best-on-validation checkpointing saves the peak model.
+true ones across 1,538 proteins. Validation F1 peaks near 0.76 around epochs 6–20 before a
+late-training divergence; best-on-validation checkpointing keeps the peak model.
 
-**Caveats:**
-- **Single split, not nested CV** — no error bars. A full 5-fold run is needed for confidence intervals.
-- **Metric fix.** Upstream `get_counts_for_protein` reused a loop variable, marking matched
-  true peptides at the *prediction's* index; when the matching prediction sat past the number
-  of true peptides, the match was dropped, **undercounting true positives** (recall/F1
-  understated). This branch fixes it, and the joint baseline above is **re-scored with the same
-  fixed metric** for a fair comparison (the fix shifts values by <0.01). The original paper's
-  published numbers use the unfixed metric.
+### Caveats
+
+- **Single split, no error bars.** These are point estimates from one training run. Run-to-run
+  variation in this pipeline is not negligible, so a difference of this size between two
+  representations should not be read as a ranking without replicates. The replicated,
+  variance-aware comparison across representations is the substance of the thesis; these
+  numbers are the reference arm, not the result.
+- **Metric fix.** Upstream `get_counts_for_protein` reuses a loop variable across the true
+  and predicted loops, marking a matched true peptide at the *prediction's* index. The
+  resulting phantom row is dropped by `groupby('group')`, converting real true positives
+  into false negatives — so **upstream understates recall and F1**, and does so more the more
+  false positives a model emits. This branch fixes it, and the joint baseline above is
+  re-scored with the same fixed metric for a fair comparison. The published paper numbers
+  use the unfixed metric.
+- **Gradient clipping.** Upstream calls `clip_grad_norm_` before `backward()`, where no
+  gradients exist yet, so the published models trained unclipped. This branch clips.
 
 ---
 
 ## Training
 
-### Step 1 — Install dependencies
+### 1 — Install
 ```bash
-pip install -r requirements.txt   # torch >= 2.0, fair-esm / esm, pandas, numpy, tensorboard, tqdm
+pip install -r requirements.txt   # torch >= 2.0, fair-esm, pandas, numpy, tensorboard, tqdm
 ```
 
-### Step 2 — Data
-Two CSVs are required (provided under `data/` for the UniProt-2022 benchmark, 7,623 sequences):
+### 2 — Data
+Two CSVs, provided under `data/` for the UniProt-2022 benchmark:
 
 - **`labeled_sequences.csv`** (indexed by `protein_id`): `sequence`, `propeptide_coordinates`
   (e.g. `(12-45),(98-113)`), `organism`.
-- **`graphpart_assignments.csv`** (indexed by `AC`): `cluster` — partition index 0–4 from
+- **`graphpart_assignments.csv`** (indexed by `AC`): `cluster`, partition index 0–4 from
   [Graph-Part](https://github.com/graph-part/graph-part).
 
-### Step 3 — Precompute embeddings
+### 3 — Precompute embeddings
 ```bash
 python -m src.utils.make_embeddings data/protein_sequences.fasta PATH/TO/EMBEDDINGS/
 ```
-Embeddings are saved as `.pt` files named by MD5 hash of the sequence. Safe to interrupt/resume.
+Saved as one `.pt` per sequence, named by MD5 hash of the sequence. Safe to interrupt and
+resume — existing files are skipped.
 
-### Step 4 — Train
-Reproduce the result above with the T4 hyperparameters:
+### 4 — Train
+Reproduces the result above:
 ```bash
 python run.py \
     --embeddings_dir PATH/TO/EMBEDDINGS \
@@ -80,34 +116,32 @@ python run.py \
     --out_dir results/esm2_prop
 ```
 
-**Key arguments:**
-
 | argument | value used | description |
 |---|---|---|
-| `--embedding_dim` | 1280 | ESM-2 output dimension |
-| `--epochs` | 50 | training epochs (all run; **no early stopping**) |
+| `--embedding_dim` | 1280 | representation dimension — 1536 for ESM3, 1024 for ProstT5 |
+| `--epochs` | 50 | training epochs |
 | `--lr` | 0.0055 | **constant** learning rate (T4); default `1e-4` |
 | `--batch_size` | 20 | sequences per batch |
 | `--dropout` / `--conv_dropout` | 0.6902 / 0.2672 | input / conv dropout |
 | `--num_filters` / `--hidden_size` / `--kernel_size` | 48 / 48 / 5 | CNN filters / biLSTM hidden / CNN kernel |
-| `--out_dir` | — | where checkpoints, metrics, and TensorBoard logs are written |
-| `--patience` | (ignored) | accepted for CLI compatibility; the faithful loop does not early-stop |
+| `--patience` | 0 | early-stopping patience; **0 disables it**, which is upstream behaviour and the default |
+| `--out_dir` | — | checkpoints, metrics and TensorBoard logs |
 
-> **Note on stability.** At full data scale the model converges to its best validation F1
-> within ~20 epochs and can diverge (loss → NaN) later. This is harmless: `model.pt` holds the
-> best-on-validation checkpoint, so the reported result comes from the peak epoch regardless.
-> Using `--epochs 25` reaches the same checkpoint and avoids the divergent tail.
+> **Stability.** The model reaches its best validation F1 within roughly 20 epochs and can
+> diverge to `NaN` later. This is harmless: checkpointing only writes on improvement, and
+> once validation F1 collapses the comparison never fires again, so `model.pt` holds the
+> pre-divergence peak regardless of what the tail does.
 
-Training writes to `--out_dir`: `model.pt` (best checkpoint), `valid_metrics.json`,
-`test_metrics.json`, `test_outputs.pickle` / `valid_outputs.pickle` (raw predictions), and
-TensorBoard logs (`tensorboard --logdir <out_dir>`).
+Writes `model.pt`, `valid_metrics.json`, `test_metrics.json`, `test_outputs.pickle` /
+`valid_outputs.pickle`, and TensorBoard logs (`tensorboard --logdir <out_dir>`).
 
-### Step 5 — Evaluate
-Test metrics (precision / recall / F1 at ±3 tolerance) are written automatically to
-`--out_dir/test_metrics.json` when training finishes.
+Test metrics at ±3 tolerance are written automatically when training finishes.
 
-To (re-)score a saved checkpoint on the test split without retraining — e.g. if a run was
-interrupted before its test phase, or to re-score with an updated metric:
+<details>
+<summary>Re-scoring a saved checkpoint without retraining</summary>
+
+Useful if a run was interrupted before its test phase, or to re-score with an updated metric.
+
 ```python
 import json, torch
 from torch.utils.data import DataLoader
@@ -134,9 +168,20 @@ r = compute_all_metrics(None, preds, None, ds.names, ds.data, windows=[3])[0]
 print("test f1_prop=%.4f  P=%.3f  R=%.3f" % (r['f1 propeptides'], r['precision propeptides'], r['recall propeptides']))
 # predicted propeptide spans per protein: convert_path_to_peptide_borders(pred, 1, 50, offset=1)
 ```
+</details>
 
 ---
 
 ## Predicting from a raw sequence
-See the [predictor README](predictor/README.md), or use `LSTMCNNCRF.predict_from_sequence(seq)`
-(embeds with ESM-2 internally and returns Viterbi propeptide spans).
+
+See the [predictor README](predictor/README.md), or call
+`LSTMCNNCRF.predict_from_sequence(seq)`, which embeds with ESM-2 internally and returns
+Viterbi propeptide spans.
+
+---
+
+## Credit
+
+All credit for the original method, dataset and architecture belongs to Teufel et al.
+This repository is a derivative work for a thesis; it is not the reference implementation.
+For that, use [fteufel/DeepPeptide](https://github.com/fteufel/DeepPeptide).
