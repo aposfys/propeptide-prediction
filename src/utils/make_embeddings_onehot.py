@@ -7,8 +7,13 @@ convention as the ESM3 embeddings from make_embeddings.py — so the downstream
 dataset/model code can be reused without modification by setting embedding_dim
 to the ESM3 tokenizer vocab size.
 
-NOTE: This script is not used in the standard ESM3 propeptide pipeline.
-It is kept for experimental comparison with the full ESM3 embeddings.
+NOTE: superseded by make_onehot_embeddings.py, which is what the control arm of
+the representation comparison actually runs on. That one encodes the 20 canonical
+amino acids plus a catch-all column (21 dims) instead of the ESM3 tokenizer
+vocabulary, so it carries no dead special-token dimensions and needs neither a GPU
+nor the ESM3 SDK -- this script loads the full model purely to read vocab_size.
+Kept because the vocabulary-sized variant is a different control and may be worth
+reporting alongside.
 '''
 from hashlib import md5
 import torch

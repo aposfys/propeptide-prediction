@@ -6,7 +6,16 @@ CRF (51 states: background + 50 propeptide positions). The training logic is
 upstream's — constant Adam LR, CRF negative log-likelihood, best-on-validation
 checkpointing — with only the changes those two differences require.
 
-This branch runs the **hyperparameter search** for that model.
+This is the consolidated ESM3 branch. It holds the sequence-only and
+structure-conditioned extractors, LoRA fine-tuning, the Optuna / nested-CV
+hyperparameter search, the ensembling scripts, and the analysis tooling
+(`verify_embeddings.py`, `summarize_results.py`, `progress.py`). It was formed by
+merging the former `esm3-multimodal-propeptide` and `esm3-propeptide-optuna-gpu`
+branches, so paths and commands from either still apply.
+
+The experimental protocol governing every arm of the comparison is in
+[EXPERIMENT.md](EXPERIMENT.md); measured results are in [RESULTS.md](RESULTS.md),
+which is currently under revision and carries a banner saying so.
 
 > ### ⚠ Read this before reusing any ESM3 embeddings made before 2026-08-19
 >
