@@ -171,6 +171,27 @@ are kept, but reported separately and framed as what they actually are: a
 tuned for ESM-2 carries to other representations. The ProstT5 divergences are a
 result of that experiment, not a defect in it.
 
+### What each comparison licenses
+
+The arms did not receive equal tuning, and no amount of framing fixes that. What
+makes the results reportable is that the bias runs in a *known direction* for
+each pair, and in one case that direction is conservative. Every comparison in
+RESULTS.md must be stated with its direction attached:
+
+- **ESM-2 vs ESM3.** ESM3's configuration was selected by comparing test F1
+  across the in-house sweep, so its mean is optimistically biased. If ESM-2 still
+  wins, the conclusion is conservative and can be stated plainly.
+- **ESM-2 vs ProstT5.** A controlled swap - identical configuration on every
+  field, both converged - but the configuration is ESM-2's. This licenses
+  "ProstT5 is worse *at ESM-2's hyperparameters*", which is an upper bound on its
+  deficit, not a claim about ProstT5 as a representation.
+- **ESM3 vs ProstT5.** Each near its own best, neither matched to the other. An
+  indistinguishable result here is the expected outcome under Lucic et al., who
+  find most models converge to similar scores once tuning budget is spent.
+- **Anything vs the one-hot control.** Only interpretable within a single
+  configuration, and subject to threat 6 - the control's head is smaller because
+  `conv1` scales with input dimension.
+
 ### Adaptation (secondary, ESM3 only)
 
 Frozen vs LoRA, ESM3 only, captioned as such. Schmirler et al. is the reference
@@ -359,6 +380,16 @@ reconstructed from memory.
   Network Optimization. *ICML 2021*. arXiv:2103.04514. — "all sources of
   nondeterminism have similar effects on measures of model diversity"; justifies
   §4a.
+- Dodge, J., Gururangan, S., Card, D., Schwartz, R., Smith, N.A. (2019). Show
+  Your Work: Improved Reporting of Experimental Results. *EMNLP-IJCNLP 2019*,
+  2185-2194. arXiv:1909.03004. - a single tuned number confounds method quality
+  with search budget; report performance as a function of the budget that
+  produced it. The citation for the tuning asymmetry in §3.
+- Lucic, M., Kurach, K., Michalski, M., Gelly, S., Bousquet, O. (2018). Are GANs
+  Created Equal? A Large-Scale Study. *NeurIPS 2018*. arXiv:1711.10337. - most
+  models reach similar scores given enough hyperparameter optimisation and
+  restarts, so apparent improvements often come from budget rather than method.
+  The precedent for an indistinguishable-arms result.
 - Dror, R., Baumer, G., Shlomov, S., Reichart, R. (2018). The Hitchhiker's Guide
   to Testing Statistical Significance in Natural Language Processing. *ACL 2018*,
   1383–1392. — significance-test selection; the paired bootstrap of §4b.
