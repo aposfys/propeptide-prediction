@@ -46,3 +46,6 @@ events.out.tfevents*
 # is already committed as results/**/optuna_trials_outer*.csv. No ignore rule
 # above matches *.db, so without this they would land in results/ commits.
 *.db
+results/**/*.pickle
+results/**/model.pt
+results/**/*.pt
