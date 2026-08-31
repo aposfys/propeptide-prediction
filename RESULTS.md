@@ -1,6 +1,6 @@
 # Results — ESM-2 single-fold reproduction
 
-Branch `baseline-upstream`. See [README.md](README.md) for what this branch is and [BRANCHES.md](BRANCHES.md) on `main` before comparing F1 across branches.
+Branch `baseline-upstream`. See [README.md](README.md) for what this branch is and `BRANCHES.md` on `main` before comparing F1 across branches.
 
 All runs below use a single split (`train=[0,1,2]`, `val=[3]`, `test=[4]`), 50 epochs,
 best-checkpoint-on-validation (stopping metric = mean of peptide & propeptide F1), evaluated at
