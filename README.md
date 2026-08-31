@@ -17,6 +17,18 @@ scheduler, keep the best checkpoint on validation.
 
 This branch is the ESM-2 arm (`esm2_t33_650M_UR50D`, 1280 dims per residue). Runs on CPU.
 
+## Before you run this
+
+This code accompanies an MSc thesis. **If you intend to run it, please contact me
+first** — apostolosfysekidis1@gmail.com. I would like to know who is using it.
+
+The trained model weights are **not published here**. They are available from me on
+request. Without them you can read, adapt and retrain the method, but you cannot run
+the predictor as reported in the thesis.
+
+This repository is MIT licensed, so the licence does not oblige you to make contact.
+The above is a request, not a condition.
+
 ## Branches
 
 One branch per embedding model. Each is a full working copy, not a patch on top of another.

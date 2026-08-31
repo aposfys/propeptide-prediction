@@ -11,3 +11,9 @@ results/**/events.out.tfevents.*
 
 # Local scratch
 *.docx
+
+# Trained model weights — available from the author on request, not published here
+predictor/checkpoints/
+predictor/checkpoints_esm1b/
+predictor/checkpoints_esm2/
+
