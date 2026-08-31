@@ -76,3 +76,78 @@ Files in `--out_dir`:
 | `test_outputs_outer{N}_inner{i}.pickle` | raw predictions, read by `measure_performance.py` |
 | `metrics_per_model.csv`, `metrics_aggregated.csv` | written by `measure_performance.py` |
 | `model_outer{N}_inner{i}.pt` | trained models (git-ignored) |
+
+## What preflight checks
+
+| check | why it matters |
+|---|---|
+| dependencies, data files, CUDA device | fails in minutes instead of hours |
+| every required embedding hash present | a missing file kills a run mid-epoch |
+| embedding dimension | ESM-2 (1280) / ESM3 (1536) / ProstT5 (1024) are easy to mix up |
+| **embedding scale ≈ 0.3 × √dim** | catches the pre-LayerNorm bug above. Same shape, same dtype, same filenames — only the values differ |
+| **rows == sequence length** | catches BOS/EOS mishandling, which shifts every label without crashing |
+| NaN/Inf, all-zero, mixed scale across files | catches a partially written extraction |
+| **stale Optuna study in `--out_dir`** | catches the zero-trial resume described above |
+| free disk, host RAM for the embedding cache | each fold writes ~1.8 GB of prediction pickles |
+
+## What you need
+
+| | | |
+|---|---|---|
+| code | ships with the repo | — |
+| data | `data/labeled_sequences.csv`, `data/graphpart_assignments.csv` | ships with the repo |
+| **embeddings** | `{md5-of-sequence}.pt`, each `(length, 1536)` float32 | **~12 GB, does NOT ship — see below** |
+| **GPU** | CUDA device | **required** — the run aborts without one |
+
+**The embeddings must be on the machine that trains.** They are read from disk on
+the first epoch of every fold. ESM3 itself is never loaded during training — its
+weights are frozen and the embeddings already capture its output — so you need the
+embedding directory, not the model.
+
+Either copy the directory across:
+
+```bash
+rsync -av --progress user@source:/path/to/embeddings/esm3/ /local/embeddings/esm3/
+```
+
+or regenerate them (this step *does* load ESM3 and wants a GPU; note that
+`esm3_sm_open_v1` is gated on Hugging Face, so you must be logged in):
+
+```bash
+huggingface-cli login
+python src/utils/make_embeddings.py data/protein_sequences.fasta /local/embeddings/esm3_normed
+```
+
+`data/protein_sequences.fasta` holds 14,583 records that deduplicate to **8,061
+unique sequences**, so that is how many `.pt` files should appear. The extractor
+**skips any hash it already finds**, so regenerating into a directory that already
+has files writes nothing and looks like success — always use a fresh directory.
+
+If you already have a set made before the LayerNorm fix, repair it instead of
+re-running ESM3 — it takes minutes on CPU rather than 8,061 GPU forward passes:
+
+```bash
+python -m src.utils.renorm_esm3_embeddings /path/to/esm3 /path/to/esm3_normed
+```
+
+It refuses to run on embeddings that already look normalised, so it cannot be
+applied twice by accident.
+
+## Choosing a protocol
+
+The paper uses two, and for comparing encoders it uses the cheaper one — *"these
+model ablation experiments were done in standard cross-validation using partition 0
+as the test set"*. Full nested CV was reserved for its two final models.
+
+| | what it is | models | cost | command |
+|---|---|---|---|---|
+| **Ablation** | standard CV, partition 0 held out | 4 | 1 search | `--fold 0` |
+| **Full nested CV** | 5 outer folds, mean ± std | 20 | 5 searches | *(omit `--fold`)* |
+
+**Start with the ablation.** It answers "is ESM3 competitive once tuned?" at a
+fifth of the cost, using the protocol the paper itself used for that question. Run
+the full nested CV once the ablation says it is worth it.
+
+Either way, each Optuna trial is scored by 4-fold inner CV — the winner is the set
+with the best mean validation F1 across the 4 inner models — and the resulting
+models are scored on the held-out test partition at ±3 residue tolerance.
