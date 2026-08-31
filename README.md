@@ -11,6 +11,25 @@ Embedder: `Rostlab/ProstT5` (1024-dim per residue).
 
 ---
 
+## What this branch is
+
+The **ProstT5** arm of the representation comparison, propeptides only: 2 labels,
+51 CRF states, mature-peptide coordinates dropped. Embeddings are 1024 dims per
+residue. Everything else — the head, the data, the Graph-Part splits, the metric
+and the training budget — is identical to `main`, so a difference in score is a
+difference in the embeddings.
+
+Scored on the test split at ±3 residue tolerance, propeptide F1:
+
+| | mean | sd | n |
+|---|---|---|---|
+| tuned (T4 hyperparameters) | **0.5189** | 0.0306 | 5 |
+| default hyperparameters | 0.4091 | 0.1094 | 5 |
+
+For reference, ESM-2 reaches 0.6153 tuned. The per-run metrics for every arm are
+collected on the `esm3-propeptide` branch under `results/`. See `main` for the
+branch map and the caution about comparing F1 across branches.
+
 ## Before you run this
 
 This code accompanies an MSc thesis. **If you intend to run it, please contact me
