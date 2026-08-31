@@ -6,7 +6,7 @@ Built on [DeepPeptide](https://github.com/fteufel/DeepPeptide) (Teufel et al.,
 *Bioinformatics* 2023, [btad616](https://doi.org/10.1093/bioinformatics/btad616)). The
 point is to compare protein language models on one task: same head, same data, same
 splits, same metric, same training budget, and only the embeddings change. This branch is
-the ESM-2 arm (`esm2_t33_650M_UR50D`, 1280 dims). Runs on CPU.
+the ESM-2 arm (`esm2_t33_650M_UR50D`, 1280 dims).
 
 ### Before you run this
 This code accompanies an MSc thesis. **If you intend to run it, please contact me first**
