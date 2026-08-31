@@ -1,6 +1,6 @@
 # Results — ESM3 (single fold, default HPs)
 
-Branch `esm3-full`. See [README.md](README.md) for what this branch is and [BRANCHES.md](BRANCHES.md) on `main` before comparing F1 across branches.
+Branch `esm3-full`. See [README.md](README.md) for what this branch is and `BRANCHES.md` on `main` before comparing F1 across branches.
 
 > 🛑 **RETRACTED — every row below predates the training/metric unification and must be
 > regenerated.** Two changes invalidate them:
