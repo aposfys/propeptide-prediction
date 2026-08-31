@@ -5,6 +5,18 @@ https://www.biorxiv.org/content/10.1101/2023.07.23.550085v1
 
 ---
 
+## What this branch is
+
+The **ProstT5** arm run the upstream way: peptides and propeptides predicted
+jointly, 3 labels and 101 CRF states, 1024-dim embeddings. Use it to separate the
+effect of the embeddings from the effect of dropping the peptide labels, which
+`prost5-propeptide` does.
+
+Because this arm uses the joint task, its F1 is not comparable to the
+propeptide-only branches without care. The per-run metrics for every arm are
+collected on the `esm3-propeptide` branch under `results/`. See `main` for the
+branch map and the caution about comparing F1 across branches.
+
 ## Before you run this
 
 This code accompanies an MSc thesis. **If you intend to run it, please contact me
