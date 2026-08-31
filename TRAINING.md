@@ -151,3 +151,12 @@ the full nested CV once the ablation says it is worth it.
 Either way, each Optuna trial is scored by 4-fold inner CV — the winner is the set
 with the best mean validation F1 across the 4 inner models — and the resulting
 models are scored on the held-out test partition at ±3 residue tolerance.
+
+## `--out_dir` must be new for a new search
+
+Optuna persists each study to SQLite
+and `train_nested_cv()` resumes with `load_if_exists=True`, running only
+`n_trials - already_done` more. Pointing at a directory that already holds a
+finished study runs **zero** new trials, silently retrains from the old
+`best_params`, and writes fresh-looking output. Preflight now detects this and
+fails.
