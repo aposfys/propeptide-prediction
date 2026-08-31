@@ -1,4 +1,12 @@
 # DeepPeptide
+
+> **Archived branch, kept for the record.** An older contributed ESM-1b fork with
+> different code and a different metric, so its F1 is not comparable to the other
+> branches without care. It is preserved because it holds a real baseline
+> measurement (propeptide F1 0.371 at ±3). It is not maintained. For the current
+> work see `main`, and please contact apostolosfysekidis1@gmail.com before running
+> any of it.
+
 Predicting cleaved peptides in protein sequences.
 
 [![DOI](https://zenodo.org/badge/593202385.svg)](https://zenodo.org/badge/latestdoi/593202385)
