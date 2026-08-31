@@ -14,8 +14,7 @@ merging the former `esm3-multimodal-propeptide` and `esm3-propeptide-optuna-gpu`
 branches, so paths and commands from either still apply.
 
 The experimental protocol governing every arm of the comparison is in
-[EXPERIMENT.md](EXPERIMENT.md); measured results are in [RESULTS.md](RESULTS.md),
-which is currently under revision and carries a banner saying so.
+[EXPERIMENT.md](EXPERIMENT.md); measured results are in [RESULTS.md](RESULTS.md).
 
 > ### ⚠ Read this before reusing any ESM3 embeddings made before 2026-08-19
 >
@@ -46,6 +45,18 @@ which is currently under revision and carries a banner saying so.
 > ```
 >
 > `preflight.py` now refuses to start a run on mis-scaled embeddings.
+
+## Before you run this
+
+This code accompanies an MSc thesis. **If you intend to run it, please contact me
+first** — apostolosfysekidis1@gmail.com. I would like to know who is using it.
+
+The trained model weights and the search outputs are **not published here**. They
+are available from me on request. Without them you can read, adapt and rerun the
+method, but you cannot reproduce the reported numbers directly.
+
+This repository is MIT licensed, so the licence does not oblige you to make contact.
+The above is a request, not a condition.
 
 ## Quick start
 
@@ -236,5 +247,4 @@ Files in `--out_dir`:
   search is meant to settle.
 - **[CHANGELOG.md](CHANGELOG.md)** — what differs from the original DeepPeptide.
 - **[predictor/README.md](predictor/README.md)** — inference with the original
-  pretrained model. Not used by the search; safe to exclude from a clone (it is
-  ~300 MB of the repository).
+  pretrained model. Not used by the search.
