@@ -40,16 +40,27 @@ Reviewed UniProt, non-viral, non-fragment — DeepPeptide's own exclusions,
 confirmed in their paper and reproduced here — with **`min_len` kept at 5** and
 the ceiling raised. Coverage with the floor fixed:
 
-| grammar | states | decode | all non-CAAX | convertase class | proteins |
-|---|---|---|---|---|---|
-| 5..50 (DeepPeptide) | 51 | 1.0× | 69.0% | 64.2% | 62.3% |
-| 5..105 | 106 | 4.3× | 81.3% | 79.5% | 74.6% |
-| **5..150** | **151** | **8.8×** | **85.0%** | **83.9%** | **78.5%** |
-| 5..262 | 263 | 26.6× | 90.7% | 90.1% | 84.6% |
+| grammar | states | decode | params | all non-CAAX | convertase class | proteins |
+|---|---|---|---|---|---|---|
+| 5..50, propeptide-only | 51 | 1.0× | 192,369 | 69.0% | 64.2% | 62.3% |
+| **5..100** | **101** | **3.9×** | **200,069** | **80.2%** | **77.9%** | **73.5%** |
+| 5..150 | 151 | 8.8× | 207,769 | 85.0% | 83.9% | 78.5% |
+| 5..262 | 263 | 26.6× | — | 90.7% | 90.1% | 84.6% |
 
-**Take 5..150.** It covers 83.9% of the convertase class against 64.2% today, at
-a decode cost that is nothing on a small head. 5..262 buys 6 more points for 3×
-the cost and can be a reported ablation.
+**Take 5..100, 101 states.** Not an arbitrary number: it is *DeepPeptide's own
+state budget*, 1 background + 50 peptide + 50 propeptide, reallocated so that all
+100 non-background states model propeptides. The paper can say it keeps the
+published state space size and changes only what the states are spent on, which
+is a cleaner claim than picking a new size.
+
+It costs almost nothing against an unconstrained choice. The convertase class
+goes 64.2% → 77.9%, a gain of 13.8 points; going on to 151 states would add only
+5.9 more for 2.3× the decode. **11.5% of non-CAAX propeptides are still longer
+than 100 residues** and remain out of scope — state that, with the number.
+
+Verified working, not assumed: at 101 states the CRF loss is finite on a
+78-residue label, every length 5..100 is a legal path under the constraint mask,
+Viterbi and marginals are correct, and gradients reach states 51–100.
 
 Every propeptide carries a **mechanism label** — CAAX (excluded, but recorded),
 convertase, zymogen, unassigned — derived from UniProt keywords and position.
@@ -63,11 +74,12 @@ original pairwise load; use the mmseqs2 backend rather than needleall.
 CRF state-space decoder over frozen PLM embeddings, as in DeepPeptide, SignalP
 6.0 and DeepTMHMM. Two changes:
 
-- **151 states** instead of 51.
+- **101 states** instead of 51 — the published state budget, spent entirely on
+  propeptides.
 - **Predict the mechanism class alongside the segment**, the way SignalP 6.0
   predicts the signal-peptide region "together with the SP type". Do not pool.
-  Keep the position grammar shared at 151 states and add a segment-level type
-  head, so decoding stays O(L·151²) rather than multiplying the state space by
+  Keep the position grammar shared at 101 states and add a segment-level type
+  head, so decoding stays O(L·101²) rather than multiplying the state space by
   the number of classes.
 
 Representation arms, all frozen, all with the same head:
@@ -129,8 +141,9 @@ archive, so the 2022 label set can be rebuilt exactly rather than approximated.
    Novel, and it reframes an inherited filter as a biological choice.
 2. **A prospective evaluation against real curation**, which is a rare thing to
    have for a positive-unlabeled problem.
-3. **A benchmark** covering 83.9% of convertase-processed propeptides against
-   64.2%, mechanism-labelled and homology-partitioned.
+3. **A benchmark** covering 77.9% of convertase-processed propeptides against
+   64.2%, mechanism-labelled and homology-partitioned, at the published state
+   budget.
 4. **Differential structure benefit by mechanism**, which explains *when*
    structure-aware PLMs help — currently an open question in the literature.
 5. A model, which is the least interesting part and should be presented that way.
@@ -144,7 +157,7 @@ archive, so the 2022 label set can be rebuilt exactly rather than approximated.
 - **AlphaFold models the precursor**, and propeptide regions are often
   low-confidence. A structure effect could be a disorder effect. Correlate the
   per-class gain with per-residue pLDDT before claiming geometry.
-- **Long propeptides are folded domains**, so a gain at 51–150 may be domain
+- **Long propeptides are folded domains**, so a gain at 51–100 may be domain
   recognition rather than cleavage-site recognition. The boundary-tolerance
   metric partly controls this; say so.
 - **GraphPart may remove more at the new size**, and the largest families are
@@ -155,7 +168,7 @@ archive, so the 2022 label set can be rebuilt exactly rather than approximated.
 1. Rebuild from UniProt 2026 with mechanism labels; re-run GraphPart. Report the
    dataset paper-ready before training anything.
 2. Rebuild the 2022 label set from the release archive for the prospective test.
-3. ESM-2 baseline at 151 states, to establish the new benchmark's numbers.
+3. ESM-2 baseline at 101 states, to establish the new benchmark's numbers.
 4. SaProt and the structure arms with scrambled controls, 8 replicates each.
 5. Per-mechanism breakdown. This is the figure.
 6. The prospective test.
