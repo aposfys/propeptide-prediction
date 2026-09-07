@@ -43,6 +43,15 @@ import urllib.request
 import pandas as pd
 
 FEATURE = re.compile(r'PROPEP\s+([?<>]?\d+|\?)\.\.([?<>]?\d+|\?)')
+# One chunk per feature so each keeps its own evidence, needed for the ProRule
+# check below.
+CHUNK = re.compile(r'(PROPEP)\s+([?<>]?\d+|\?)\.\.([?<>]?\d+|\?)(.*?)(?=PROPEP\s|\Z)', re.S)
+# Teufel et al. remove sorting signals mis-annotated as propeptides via these
+# ProRules. build_dataset.py drops them, so the validator has to know they are
+# meant to be absent -- otherwise a correct build fails check 1. This caught
+# exactly one case, Q8CJY7, which carries overlapping annotations (219-252) and
+# (221-252) where only the second cites PRU00477.
+SORTING_SIGNAL_RULES = ('PRU00477', 'PRU01070')
 VIRAL = re.compile(r'virus|viral|phage|viroid', re.I)
 FIELDS = 'accession,sequence,length,organism_name,fragment,keyword,ft_propep'
 STREAM = 'https://rest.uniprot.org/uniprotkb/stream?query={q}&fields={f}&format=tsv'
@@ -75,9 +84,11 @@ def load_uniprot(cache_path):
         keywords = {k.strip() for k in (row.get('Keywords') or '').split(';') if k.strip()}
         sequence = (row.get('Sequence') or '').strip()
         spans = []
-        for match in FEATURE.finditer(row.get('Propeptide') or ''):
-            start, end = match.group(1), match.group(2)
+        for match in CHUNK.finditer(row.get('Propeptide') or ''):
+            start, end, tail = match.group(2), match.group(3), match.group(4)
             if '?' in start or '?' in end:
+                continue
+            if any(rule in tail for rule in SORTING_SIGNAL_RULES):
                 continue
             spans.append((int(start.lstrip('<>')), int(end.lstrip('<>'))))
         out[row['Entry']] = {
