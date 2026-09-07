@@ -12,6 +12,11 @@ import pickle
 from typing import List, Tuple
 from tqdm.auto import tqdm
 
+# Defaults for the published 51-state grammar (background 0, propeptide 1..50).
+# compute_all_metrics takes an `end_state` argument so a run with a widened
+# grammar is scored against its own state space rather than this constant --
+# decoding a 106-state path with stop_state=50 would silently truncate every
+# propeptide. See GRAMMAR.md.
 PROPEPTIDE_START_STATE, PROPEPTIDE_END_STATE = 1, 50
 
 def convert_path_to_peptide_borders(pred: List[int], start_state, stop_state, offset: int=0) -> List[Tuple[int,int]]:
@@ -174,8 +179,18 @@ def compute_peptide_finding_metrics(true_start_stop: List[List[Tuple[int,int]]],
     return precision, recall, f1
     
 
-def compute_all_metrics(probs: np.ndarray, preds: np.ndarray, labels: np.ndarray, names: np.ndarray, true_df, windows: List[int] = [0,1,2,3]):
-    propeptide_borders = [convert_path_to_peptide_borders(pred, start_state=PROPEPTIDE_START_STATE, stop_state=PROPEPTIDE_END_STATE, offset=1) for pred in preds]
+def compute_all_metrics(probs: np.ndarray, preds: np.ndarray, labels: np.ndarray, names: np.ndarray, true_df, windows: List[int] = [0,1,2,3], end_state: int = PROPEPTIDE_END_STATE):
+    '''Segment-level propeptide metrics, one dict per boundary tolerance.
+
+    `windows` is a list of tolerances in residues, and the return value is a list
+    in the same order -- so `windows=[1, 3]` gives `[metrics_at_1, metrics_at_3]`.
+    A prediction counts as a hit only if BOTH boundaries fall within tolerance,
+    which is why the tolerance matters so much: +/-1 is a near-exact cleavage-site
+    call, +/-3 is the published DeepPeptide setting.
+
+    `end_state` is the last propeptide state of the grammar in use (max_len).
+    '''
+    propeptide_borders = [convert_path_to_peptide_borders(pred, start_state=PROPEPTIDE_START_STATE, stop_state=end_state, offset=1) for pred in preds]
 
     prediction_df = pd.DataFrame({'pred_propeptides': propeptide_borders}, index=names)
     df = prediction_df.join(true_df[['true_propeptides']])

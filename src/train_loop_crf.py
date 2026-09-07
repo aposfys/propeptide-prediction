@@ -28,6 +28,37 @@ from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
 from .utils.dataset import PrecomputedCSVForOverlapCRFDataset
 from .utils.manuscript_metrics import compute_all_metrics
 
+# Boundary tolerances scored on every run, in residues. The LAST entry is the
+# selection metric and the one reported bare as 'f1 propeptides', so that every
+# number already in RESULTS.md stays comparable. Earlier entries are recorded
+# under a '@N' suffix and are reporting only -- selecting on +/-1 would change
+# what "best epoch" means and silently break that comparability.
+TOLERANCES = [1, 3]
+
+
+def flatten_tolerances(metrics_per_window):
+    '''Suffix each tolerance's metrics with '@N' so one dict holds them all.
+
+    e.g. {'f1 propeptides@1': ..., 'f1 propeptides@3': ...}. The caller leaves
+    the unsuffixed keys holding the selection tolerance, so anything already
+    reading test_metrics.json['f1 propeptides'] keeps working unchanged.
+    '''
+    flat = {}
+    for tolerance, metrics in zip(TOLERANCES, metrics_per_window):
+        for key, value in metrics.items():
+            flat[f'{key}@{tolerance}'] = value
+    return flat
+
+
+def score(probs, preds, labels, loader, args):
+    '''Metrics at every tolerance, with the selection tolerance unsuffixed.'''
+    per_window = compute_all_metrics(
+        probs, preds, labels, loader.dataset.names, loader.dataset.data,
+        windows=TOLERANCES, end_state=getattr(args, 'max_peptide_len', 50))
+    metrics = dict(per_window[-1])
+    metrics.update(flatten_tolerances(per_window))
+    return metrics
+
 import argparse
 
 # This branch is GPU-only. Device selection still falls back so that the module
@@ -90,18 +121,20 @@ def get_dataloaders(
     test_partitions: List[int],
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
+    grammar = {'max_len': getattr(args, 'max_peptide_len', 50),
+               'min_len': getattr(args, 'min_peptide_len', 5)}
     if args.embedding == 'precomputed':
         train_set = PrecomputedCSVForOverlapCRFDataset(
             args.embeddings_dir, args.data_file, args.partitioning_file,
-            partitions=train_partitions,
+            partitions=train_partitions, **grammar,
         )
         valid_set = PrecomputedCSVForOverlapCRFDataset(
             args.embeddings_dir, args.data_file, args.partitioning_file,
-            partitions=valid_partitions,
+            partitions=valid_partitions, **grammar,
         )
         test_set = PrecomputedCSVForOverlapCRFDataset(
             args.embeddings_dir, args.data_file, args.partitioning_file,
-            partitions=test_partitions,
+            partitions=test_partitions, **grammar,
         )
     else:
         raise NotImplementedError(args.embedding)
@@ -142,12 +175,20 @@ def get_dataloaders(
 # ---------------------------------------------------------------------------
 
 def get_model(args: argparse.Namespace) -> torch.nn.Module:
+    # One source of truth for the grammar: num_states is derived from max_len,
+    # never passed independently, so the CRF and the label encoder cannot drift
+    # apart. Defaults are the published 5..50 window -- see GRAMMAR.md.
+    max_len = getattr(args, 'max_peptide_len', 50)
+    min_len = getattr(args, 'min_peptide_len', 5)
+
     if args.model == 'lstmcnncrf':
         model = LSTMCNNCRF(
             input_size=args.embedding_dim,
             num_labels=2,
             dropout_input=args.dropout,
-            num_states=51,
+            num_states=max_len + 1,
+            max_len=max_len,
+            min_len=min_len,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
             filter_size=args.kernel_size,
@@ -158,7 +199,9 @@ def get_model(args: argparse.Namespace) -> torch.nn.Module:
             input_size=args.embedding_dim,
             num_labels=2,
             dropout_input=args.dropout,
-            num_states=51,
+            num_states=max_len + 1,
+            max_len=max_len,
+            min_len=min_len,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
             filter_size=args.kernel_size,
@@ -170,7 +213,9 @@ def get_model(args: argparse.Namespace) -> torch.nn.Module:
             hidden_size=args.hidden_size,
             num_labels=2,
             dropout_input=args.dropout,
-            num_states=51,
+            num_states=max_len + 1,
+            max_len=max_len,
+            min_len=min_len,
             n_heads=args.num_filters,
             attn_dropout=args.conv_dropout,
         )
@@ -317,11 +362,7 @@ def run_training_for_params(
             valid_loader, model, optimizer, writer, do_train=False,
             collect_probs=False,
         )
-        valid_metrics = compute_all_metrics(
-            valid_probs, valid_preds, valid_labels,
-            valid_loader.dataset.names, valid_loader.dataset.data,
-            windows=[3],
-        )[0]
+        valid_metrics = score(valid_probs, valid_preds, valid_labels, valid_loader, args)
 
         score = valid_metrics['f1 propeptides']
         writer.add_scalar('Valid/f1_propeptides', score, global_step=epoch)
@@ -572,14 +613,18 @@ def train(args, train_partitions=[0,1,2], valid_partitions=[3], test_partitions=
     _, test_probs, test_preds, _, test_labels = run_dataloader(
         test_loader, model, optimizer, writer, do_train=False)
 
-    from src.utils.manuscript_metrics import compute_all_metrics
-    test_metrics = compute_all_metrics(
-        test_probs, test_preds, test_labels,
-        test_loader.dataset.names, test_loader.dataset.data, windows=[3])[0]
+    test_metrics = score(test_probs, test_preds, test_labels, test_loader, args)
 
     pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names),
                 open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
     json.dump(test_metrics, open(os.path.join(args.out_dir, 'test_metrics.json'), 'w'), indent=2)
+    # RESULTS.md, Provenance: 68 of 84 finished runs have no valid_metrics.json,
+    # because this single-run path wrote test metrics and not validation ones --
+    # so which epoch was selected is unauditable for most of the study. This is
+    # the one line that fixes it, mirroring main:src/train_loop_crf.py:125.
+    if best_val_metrics is not None:
+        json.dump(best_val_metrics,
+                  open(os.path.join(args.out_dir, 'valid_metrics.json'), 'w'), indent=2)
     return best_val_metrics, test_metrics
 
 
@@ -754,11 +799,7 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
             _, test_probs, test_preds, _, test_labels = run_dataloader(
                 test_loader, model, optimizer, writer, do_train=False,
             )
-            test_metrics = compute_all_metrics(
-                test_probs, test_preds, test_labels,
-                test_loader.dataset.names, test_loader.dataset.data,
-                windows=[3],
-            )[0]
+            test_metrics = score(test_probs, test_preds, test_labels, test_loader, args)
             test_metrics['outer_fold'] = outer_fold
             test_metrics['inner_fold'] = inner_i
             outer_fold_test_metrics.append(test_metrics)
@@ -841,6 +882,20 @@ def parse_arguments() -> argparse.Namespace:
 
     p.add_argument('--out_dir', '-od', type=str, default='train_run')
     p.add_argument('--epochs', type=int, default=50)
+    p.add_argument('--min_peptide_len', type=int, default=5,
+                   help='Shortest propeptide the CRF grammar can represent. The '
+                        'published value is 5, inherited from the 5-50 filter '
+                        'Teufel et al. applied when building the benchmark. '
+                        'Lowering it to 2 covers 13 more points of UniProt '
+                        'annotations at NO extra states, at the cost of the '
+                        'dedicated N-terminal start states. See GRAMMAR.md.')
+    p.add_argument('--max_peptide_len', type=int, default=50,
+                   help='Longest propeptide the CRF grammar can represent; the '
+                        'state space is this + 1. The distributed benchmark is '
+                        'pre-filtered to 5-50, so raising this cannot change a '
+                        'score on it -- it is here for a dataset rebuilt from '
+                        'unfiltered UniProt. Viterbi is O(L * states^2). '
+                        'See GRAMMAR.md.')
     p.add_argument('--patience', type=int, default=0,
                    help='Early stopping patience (epochs without improvement). '
                         '0 = disabled, run the full epoch budget and keep the '

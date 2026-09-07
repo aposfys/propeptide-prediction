@@ -47,13 +47,29 @@ class CRFBaseModel(nn.Module):
     def __init__(
         self,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 51 # total number of states in the state space model
+        num_states = 51, # total number of states in the state space model
+        max_len: int = 50,
+        min_len: int = 5,
         ) -> None:
 
 
         super().__init__()
-        self.max_len = 50
-        self.min_len = 5
+        # The grammar is a hard cap: a propeptide longer than max_len has no
+        # representation in this state space at all. 50 is inherited from
+        # Teufel et al., who filtered the benchmark to 5..50 -- see GRAMMAR.md
+        # for what that window covers in UniProt (65% of annotations) and what
+        # it would cost to widen it. Defaults reproduce the published grammar
+        # exactly; test_grammar.py asserts that.
+        if num_states != max_len + 1:
+            raise ValueError(
+                f'num_states ({num_states}) must be max_len + 1 ({max_len + 1}): '
+                'state 0 is background and states 1..max_len are propeptide '
+                'positions. Passing them independently is how a grammar and a '
+                'CRF silently disagree.')
+        if min_len < 1 or min_len > max_len:
+            raise ValueError(f'min_len {min_len} must be in 1..max_len ({max_len})')
+        self.max_len = max_len
+        self.min_len = min_len
         self.feature_extractor = None
         self.features_to_emissions = nn.Linear(64, num_labels)
         self.num_states = num_states
@@ -223,11 +239,13 @@ class CRFBaseModel(nn.Module):
             emissions = self.features_to_emissions(features) # (batch_size, seq_len, num_labels)
             emissions = self._repeat_emissions(emissions) # (batch_size, seq_len, num_states)
 
-            targets = self._make_tag_bitmap(len(sequence), start, stop, start_state=1)
+            targets = self._make_tag_bitmap(len(sequence), start, stop, start_state=1,
+                                            min_len=self.min_len, max_len=self.max_len)
             targets = torch.unsqueeze(targets,0)
             llh_pep= self.crf(emissions = emissions, tag_bitmap=targets.long(), mask = mask.byte(), reduction='none')
             
-            targets = self._make_tag_bitmap(len(sequence), start, stop, start_state=1)
+            targets = self._make_tag_bitmap(len(sequence), start, stop, start_state=1,
+                                            min_len=self.min_len, max_len=self.max_len)
             targets = torch.unsqueeze(targets,0)
             llh_pro= self.crf(emissions = emissions, tag_bitmap=targets.long(), mask = mask.byte(), reduction='none')
 
@@ -246,10 +264,12 @@ class LSTMCNNCRF(CRFBaseModel):
         hidden_size: int = 128,
         num_lstm_layers : int = 1,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 51 # total number of states in the state space model
+        num_states = 51, # total number of states in the state space model
+        max_len: int = 50,
+        min_len: int = 5,
         ) -> None:
 
-        super().__init__(num_labels, num_states)
+        super().__init__(num_labels, num_states, max_len, min_len)
 
         self.feature_extractor = LSTMCNN(input_size=input_size, dropout_input=dropout_input, n_filters=n_filters, filter_size=filter_size, hidden_size=hidden_size, num_lstm_layers=1, dropout_conv1=dropout_conv1, n_tissues=0)
         self.features_to_emissions = nn.Linear(n_filters*2, num_labels)
@@ -274,10 +294,16 @@ class SimpleLSTMCNNCRF(CRFBaseModel):
         hidden_size: int = 128,
         num_lstm_layers : int = 1,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 2 # total number of states in the state space model
+        num_states = 2, # total number of states in the state space model
+        max_len: int = 50,
+        min_len: int = 5,
         ) -> None:
 
 
+        # This model has an unconstrained 2-state CRF, so the propeptide state
+        # grammar does not apply to it. The arguments are accepted and ignored
+        # so get_model can pass them uniformly, and super() is still called with
+        # no grammar so CRFBaseModel keeps its own defaults.
         super().__init__()
 
         self.feature_extractor = LSTMCNN(input_size=input_size, dropout_input=dropout_input, n_filters=n_filters, filter_size=filter_size, hidden_size=hidden_size, num_lstm_layers=1, dropout_conv1=dropout_conv1, n_tissues=0)
@@ -362,11 +388,13 @@ class SelfAttentionCRF(CRFBaseModel):
         n_heads: int = 4,
         attn_dropout: float = 0.15,
         num_labels: int = 2, #logits (=emissions) to produce by the NN
-        num_states = 51 # total number of states in the state space model
+        num_states = 51, # total number of states in the state space model
+        max_len: int = 50,
+        min_len: int = 5,
         ) -> None:
 
 
-        super().__init__(num_labels, num_states)
+        super().__init__(num_labels, num_states, max_len, min_len)
 
         self.feature_extractor = SelfAttentionFeatureNet(input_size, hidden_size, dropout_input, n_heads, attn_dropout)
 

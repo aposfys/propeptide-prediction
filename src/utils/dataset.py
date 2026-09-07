@@ -467,9 +467,15 @@ class PrecomputedCSVForCRFDataset(Dataset):
 
 class PrecomputedCSVForOverlapCRFDataset(Dataset):
     '''Use together with modified extract.py script. Retrieves seqs via md5 hash.'''
-    def __init__(self, embeddings_dir, data_file, partitioning_file, partitions=[0], label_type=None):
+    def __init__(self, embeddings_dir, data_file, partitioning_file, partitions=[0],
+                 label_type=None, max_len: int = 50, min_len: int = 5):
         super().__init__()
         self.embeddings_dir = embeddings_dir
+        # The label grammar and the CRF's state space have to agree. Both come
+        # from the same two args in train_loop_crf, so they cannot drift apart.
+        # Defaults are the published 5..50 window -- see GRAMMAR.md.
+        self.max_len = max_len
+        self.min_len = min_len
 
         data = pd.read_csv(data_file, index_col='protein_id')
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
@@ -509,7 +515,8 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         embeddings = _EMBEDDING_CACHE[pt_path]
 
         propeptides = self.propeptides[index]
-        label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1, max_len=50)
+        label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1,
+                                               max_len=self.max_len, min_len=self.min_len)
         label = torch.from_numpy(label)
         mask = torch.ones(embeddings.shape[0])
 

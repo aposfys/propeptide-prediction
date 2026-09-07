@@ -73,6 +73,31 @@ def peptide_list_to_label_sequence(peptides: List[Tuple[int,int]], protein_lengt
     for start, end in peptides:
         peptide_length = end - start + 1 #upper bound is inclusive.
 
+        # A peptide longer than max_len has no path through the state space. The
+        # arithmetic below does not notice: it runs the C-terminal counter past
+        # the start of the range and emits NEGATIVE state indices, which the old
+        # code reported with a printed 'Bad label!' and then returned anyway.
+        # Silent label corruption behind a print statement is the worst of both
+        # worlds, so refuse instead.
+        #
+        # Unreachable on the distributed benchmark, which Teufel et al. filtered
+        # to 5..50 -- every one of its 8,201 propeptides fits. It becomes
+        # reachable the moment anyone rebuilds the dataset from unfiltered
+        # UniProt, where 21% of annotations are longer than 50. See GRAMMAR.md.
+        if peptide_length > max_len:
+            raise ValueError(
+                f'propeptide {start}-{end} is {peptide_length} residues, longer '
+                f'than the grammar\'s max_len of {max_len}. It has no '
+                f'representation in a {max_len + 1}-state CRF. Raise '
+                f'--max_peptide_len (and --embedding_dim stays unchanged), or '
+                f'filter the dataset. See GRAMMAR.md.')
+        if peptide_length < min_len:
+            raise ValueError(
+                f'propeptide {start}-{end} is {peptide_length} residues, shorter '
+                f'than the grammar\'s min_len of {min_len}. Lower '
+                f'--min_peptide_len (this costs no extra states) or filter the '
+                f'dataset. See GRAMMAR.md.')
+
         peptide_label = np.concatenate(
             [ 
             np.arange(start_state, start_state+min_len-2),#np.arange(1, 4), # from start to first position with skip connections
@@ -85,10 +110,15 @@ def peptide_list_to_label_sequence(peptides: List[Tuple[int,int]], protein_lengt
         label[start-1:end] = peptide_label
 
 
-    if any(label<0):
-        print('Bad label!', label)
-        #import ipdb; ipdb.set_trace()
-        
+    # Defensive: the two length guards above should make this unreachable. Kept
+    # as an assertion rather than the original print, so a grammar bug cannot
+    # reach the CRF as a negative tag index.
+    if (label < 0).any():
+        raise ValueError(
+            f'negative state index in the label sequence for peptides {peptides}. '
+            f'This is a grammar bug, not a data problem -- max_len={max_len}, '
+            f'min_len={min_len}.')
+
     return label
 
 
