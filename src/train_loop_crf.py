@@ -17,6 +17,27 @@ from .models import LSTMCNNCRF, SimpleLSTMCNNCRF, SelfAttentionCRF
 from .utils import add_dict_to_writer, PrecomputedCSVForOverlapCRFDataset
 #from .utils.metrics_cleaned import compute_metrics, compute_metrics_with_propeptides
 from .utils.manuscript_metrics import compute_all_metrics
+
+# Boundary tolerances scored on every run, in residues. The LAST entry is the
+# selection metric and the one reported bare as 'f1 propeptides', so that every
+# number stays comparable with the runs already in RESULTS.md. Earlier entries
+# are recorded under a '@N' suffix and are reporting only.
+TOLERANCES = [1, 3]
+
+
+def flatten_tolerances(metrics_per_window):
+    '''Suffix each tolerance's metrics with '@N' so one dict holds them all.
+
+    e.g. {'f1 propeptides@1': ..., 'precision propeptides@1': ...,
+          'f1 propeptides@3': ..., ...}. The unsuffixed keys are left to the
+    selection tolerance by the caller, so existing readers of
+    test_metrics.json['f1 propeptides'] keep working unchanged.
+    '''
+    flat = {}
+    for tolerance, metrics in zip(TOLERANCES, metrics_per_window):
+        for key, value in metrics.items():
+            flat[f'{key}@{tolerance}'] = value
+    return flat
 from torch.optim import Adam
 import torch
 import numpy as np
@@ -34,10 +55,12 @@ global_step = 0
 
 def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1,2], valid_partitions: List[int] = [3], test_partitions: List[int] = [4]) -> Tuple[DataLoader, DataLoader, DataLoader]:
 
+    grammar = {'max_len': getattr(args, 'max_peptide_len', 50),
+               'min_len': getattr(args, 'min_peptide_len', 5)}
     if args.embedding == 'precomputed':
-        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions)
-        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions)
-        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions)
+        train_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=train_partitions, **grammar)
+        valid_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=valid_partitions, **grammar)
+        test_set = PrecomputedCSVForOverlapCRFDataset(args.embeddings_dir, args.data_file, args.partitioning_file, partitions=test_partitions, **grammar)
 
     print(f'Loaded data. {len(train_set)} train sequences (p.{train_partitions}), {len(valid_set)} validation sequences (p.{valid_partitions}), {len(test_set)} test sequences (p.{test_partitions}).')
 
@@ -51,12 +74,19 @@ def get_dataloaders(args: argparse.Namespace, train_partitions: List[int] = [0,1
 
 def get_model(args: argparse.Namespace):
 
+    # One source of truth for the grammar: num_states is derived, never passed
+    # independently, so the CRF and the label encoder cannot disagree.
+    max_len = getattr(args, 'max_peptide_len', 50)
+    min_len = getattr(args, 'min_peptide_len', 5)
+
     if args.model == 'lstmcnncrf':
         model = LSTMCNNCRF(
             input_size=args.embedding_dim,
             num_labels=2,
             dropout_input=args.dropout,
-            num_states=51,
+            num_states=max_len + 1,
+            max_len=max_len,
+            min_len=min_len,
             n_filters=args.num_filters,
             hidden_size=args.hidden_size,
             filter_size=args.kernel_size,
@@ -79,7 +109,9 @@ def get_model(args: argparse.Namespace):
             hidden_size=args.hidden_size,
             num_labels=2,
             dropout_input=args.dropout,
-            num_states=51,
+            num_states=max_len + 1,
+            max_len=max_len,
+            min_len=min_len,
             n_heads=args.num_filters,
             attn_dropout=args.conv_dropout,
         )
@@ -115,7 +147,13 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
         train_loss, train_probs, train_preds, train_peptides, train_labels = run_dataloader(train_loader, model, optimizer, writer, do_train=True)
 
         valid_loss, valid_probs, valid_preds, valid_peptides, valid_labels = run_dataloader(valid_loader, model, optimizer, writer, do_train=False)
-        valid_metrics = compute_all_metrics(valid_probs, valid_preds, valid_labels, valid_loader.dataset.names, valid_loader.dataset.data, windows=[3])[0]
+        # Score at both tolerances. TOLERANCES[-1] (=3) is the selection metric
+        # and the one every published number uses; +/-1 is carried alongside so
+        # the near-exact cleavage-site behaviour is on record. Selecting on +/-1
+        # would silently change what "best epoch" means and break comparability.
+        valid_at = compute_all_metrics(valid_probs, valid_preds, valid_labels, valid_loader.dataset.names, valid_loader.dataset.data, windows=TOLERANCES, end_state=getattr(args, 'max_peptide_len', 50))
+        valid_metrics = dict(valid_at[-1])
+        valid_metrics.update(flatten_tolerances(valid_at))
         add_dict_to_writer(valid_metrics, writer, global_step, prefix='Valid')
         writer.add_scalar('Valid/loss', valid_loss, global_step=global_step)
 
@@ -147,7 +185,9 @@ def train(args, train_partitions: List[int] = [0,1,2], valid_partitions: List[in
     test_loss, test_probs, test_preds, test_peptides, test_labels = run_dataloader(test_loader, model, optimizer, writer, do_train=False)
     #test_metrics = compute_crf_metrics(test_probs, test_preds, test_peptides, test_labels, organism=test_loader.dataset.data['organism'])
     #test_metrics = metrics_fn(test_peptides, test_preds, test_loader.dataset.data['organism'])
-    test_metrics = compute_all_metrics(test_probs, test_preds, test_labels, test_loader.dataset.names, test_loader.dataset.data, windows = [3])[0]
+    test_at = compute_all_metrics(test_probs, test_preds, test_labels, test_loader.dataset.names, test_loader.dataset.data, windows=TOLERANCES, end_state=getattr(args, 'max_peptide_len', 50))
+    test_metrics = dict(test_at[-1])
+    test_metrics.update(flatten_tolerances(test_at))
     add_dict_to_writer(test_metrics, writer, global_step, prefix='Test')
     writer.add_scalar('Test/loss', test_loss, global_step=global_step)
     print('Test complete.')
@@ -249,6 +289,20 @@ def parse_arguments():
     p.add_argument('--kernel_size', type=int, default=3)
     p.add_argument('--num_filters', type=int, default=32)
     p.add_argument('--hidden_size', type=int, default=64)
+    p.add_argument('--min_peptide_len', type=int, default=5,
+                   help='Shortest propeptide the CRF grammar can represent. '
+                        'The published value is 5, inherited from the 5-50 '
+                        'filter Teufel et al. applied when building the '
+                        'benchmark. Lowering it to 2 covers 13 more points of '
+                        'UniProt annotations at NO extra states, at the cost of '
+                        'the dedicated N-terminal start states. See GRAMMAR.md.')
+    p.add_argument('--max_peptide_len', type=int, default=50,
+                   help='Longest propeptide the CRF grammar can represent; the '
+                        'state space is this + 1. The distributed benchmark is '
+                        'pre-filtered to 5-50, so raising this cannot change a '
+                        'score on it -- it is here for a dataset rebuilt from '
+                        'unfiltered UniProt. Viterbi is O(L * states^2). '
+                        'See GRAMMAR.md.')
     p.add_argument('--patience', type=int, default=0,
                    help='Early stopping patience (epochs without improvement). '
                         '0 = disabled, run the full epoch budget and keep the '

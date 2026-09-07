@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+embeddings/
+structures/
+three_di/

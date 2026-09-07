@@ -439,7 +439,7 @@ _EMBEDDING_CACHE: dict = {}
 
 
 class PrecomputedCSVForOverlapCRFDataset(Dataset):
-    '''Propeptide-only dataset. Labels use states 1-50 for propeptide, 0 for background.
+    '''Propeptide-only dataset. Labels use states 1..max_len for propeptide, 0 for background.
     Embeddings are cached in memory after the first load so repeated epoch access is fast.'''
     def __init__(
         self,
@@ -448,9 +448,17 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         partitioning_file: str,
         partitions: List[int] = [0],
         label_type=None,  # kept for API compatibility, unused
+        max_len: int = 50,
+        min_len: int = 5,
     ):
         super().__init__()
         self.embeddings_dir = embeddings_dir
+        # The label grammar and the CRF's state space have to agree. They are
+        # passed from the same two args in train_loop_crf.get_dataloaders /
+        # get_model so they cannot drift apart. Defaults are the published
+        # 5..50 window -- see GRAMMAR.md.
+        self.max_len = max_len
+        self.min_len = min_len
 
         data = pd.read_csv(data_file, index_col='protein_id')
         partitioning = pd.read_csv(partitioning_file, index_col='AC')
@@ -493,7 +501,8 @@ class PrecomputedCSVForOverlapCRFDataset(Dataset):
         embeddings = _EMBEDDING_CACHE[pt_path]
 
         propeptides = self.propeptides[index]
-        label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1, max_len=50)
+        label = peptide_list_to_label_sequence(propeptides, seq_len, start_state=1,
+                                               max_len=self.max_len, min_len=self.min_len)
         label = torch.from_numpy(label)
         mask = torch.ones(embeddings.shape[0])
 
