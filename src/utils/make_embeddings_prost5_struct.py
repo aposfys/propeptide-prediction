@@ -390,7 +390,7 @@ def main():
                              'each token to the AA channel\'s norm, so proteins '
                              'with and without a structure arrive at the same '
                              'scale. Raw sum (~1.43x) and mean (~0.72x) leave '
-                             'the ~12% with no structure at 1.00x, splitting the '
+                             'the ~12%% with no structure at 1.00x, splitting the '
                              'dataset into two scale regimes in a head that has '
                              'no input normalisation.')
     parser.add_argument('--seed', type=int, default=42,
