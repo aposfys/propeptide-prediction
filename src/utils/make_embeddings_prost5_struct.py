@@ -142,12 +142,21 @@ def _encode_batch(model, tokenizer, device, formatted, lengths):
 
 
 def generate(fasta_file, out_dir, three_di_path, tracks, shuffle_3di, model_name,
-             half_precision, max_residues, max_seq_len, max_batch, seed):
+             half_precision, max_residues, max_seq_len, max_batch, seed,
+             fuse='concat'):
     from transformers import T5EncoderModel, T5Tokenizer
 
     want_aa = tracks in ('aa', 'aa+3di')
     want_3di = tracks in ('3di', 'aa+3di')
-    dimension = 1024 * (int(want_aa) + int(want_3di))
+    # `concat` doubles the input width, which widens conv1 from 1024 to 2048
+    # input channels (+98,304 parameters, +51% on the head). `sum` and `mean`
+    # combine the two channels element-wise and leave the width at 1024, so the
+    # model is byte-identical to the sequence-only arm and the comparison is
+    # purely about features. See FUSION.md.
+    if fuse == 'concat':
+        dimension = 1024 * (int(want_aa) + int(want_3di))
+    else:
+        dimension = 1024
 
     three_di_by_hash = {}
     if want_3di:
@@ -162,8 +171,8 @@ def generate(fasta_file, out_dir, three_di_path, tracks, shuffle_3di, model_name
     # recoverable from the .pt files, and provenance must not depend on
     # remembering the command line.
     os.makedirs(out_dir, exist_ok=True)
-    json.dump({'tracks': tracks, 'shuffle_3di': shuffle_3di, 'seed': seed,
-               'three_di': three_di_path, 'model': model_name,
+    json.dump({'tracks': tracks, 'fuse': fuse, 'shuffle_3di': shuffle_3di,
+               'seed': seed, 'three_di': three_di_path, 'model': model_name,
                'half_precision': half_precision, 'embedding_dim': dimension},
               open(os.path.join(out_dir, 'extraction_config.json'), 'w'), indent=2)
 
@@ -241,7 +250,56 @@ def generate(fasta_file, out_dir, three_di_path, tracks, shuffle_3di, model_name
         for (digest, sequence, _), aa_vector, di_vector in zip(pending, aa_vectors,
                                                                di_vectors):
             parts = [part for part in (aa_vector, di_vector) if part is not None]
-            embedding = torch.cat(parts, dim=-1) if len(parts) > 1 else parts[0]
+            if len(parts) == 1:
+                embedding = parts[0]
+            elif fuse == 'concat':
+                embedding = torch.cat(parts, dim=-1)
+            else:
+                # Element-wise fusion. Both channels are outputs of the SAME
+                # ProstT5 encoder, so they live in one vector space and adding
+                # them is meaningful in a way it would not be across models.
+                #
+                # `mean` is over the channels actually PRESENT, not a fixed
+                # divide by two: a protein with no structure has an all-zero 3Di
+                # channel, and averaging that in would halve its AA vector and
+                # leave 12% of the dataset at a different scale from the rest.
+                # This repository has already been burned once by feeding the
+                # head features whose norm was off (EMBEDDINGS.md), so the
+                # masked proteins get their AA vector through unchanged.
+                aa_part, di_part = parts
+                has_structure = bool(di_part.abs().sum() > 0)
+                if not has_structure:
+                    # No structure: the AA vector passes through untouched, at
+                    # full scale, whatever the mode. Every mode agrees here.
+                    embedding = aa_part
+                elif fuse == 'sum':
+                    embedding = aa_part + di_part
+                elif fuse == 'mean':
+                    embedding = (aa_part + di_part) / 2
+                else:  # 'renorm'
+                    # Add, then rescale each token so its norm matches the AA
+                    # channel's. This is the only 1024-dim mode with no scale
+                    # split in it.
+                    #
+                    # Measured on two roughly uncorrelated channels: raw `sum`
+                    # lands at ~1.43x the AA norm and raw `mean` at ~0.72x --
+                    # but ONLY for the ~88% of proteins that have a structure.
+                    # The other 12% pass through at 1.00x. So `sum` and `mean`
+                    # both split the dataset into two scale regimes, in a head
+                    # (LSTMCNN) that has no input normalisation. That is the
+                    # same class of defect as the ESM3 pre-LayerNorm bug in
+                    # EMBEDDINGS.md, which saturated 90.7% of the biLSTM gates
+                    # and invalidated every result before 2026-08-19.
+                    #
+                    # Renormalising removes the split: structured and
+                    # unstructured proteins both arrive at the AA channel's
+                    # scale, so the only thing that varies across the dataset is
+                    # the DIRECTION of the vector, which is where the structural
+                    # information is.
+                    fused = aa_part + di_part
+                    aa_norm = aa_part.norm(dim=-1, keepdim=True)
+                    fused_norm = fused.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+                    embedding = fused * (aa_norm / fused_norm)
             if embedding.shape != (len(sequence), dimension):
                 raise RuntimeError(
                     f'refusing to write a {tuple(embedding.shape)} tensor for a '
@@ -281,6 +339,22 @@ def generate(fasta_file, out_dir, three_di_path, tracks, shuffle_3di, model_name
     # which silently drops the trailing batch while still reporting success.
     flush()
 
+    # Per-token L2 norm, spot-checked. LSTMCNN has no input normalisation, and
+    # an off-scale input is exactly the bug that invalidated every pre-2026-08-19
+    # ESM3 result (EMBEDDINGS.md). Element-wise fusion changes this number, so
+    # print it rather than leaving it to be discovered during training.
+    import glob
+    sample = sorted(glob.glob(os.path.join(out_dir, '*.pt')))[:25]
+    if sample:
+        norms = [float(torch.load(p).norm(dim=-1).mean()) for p in sample]
+        print(f'\nmean per-token L2 norm over {len(sample)} files: '
+              f'{sum(norms)/len(norms):.3f}')
+        if fuse != 'concat':
+            print('  Compare this against the sequence-only arm. Element-wise '
+                  'fusion of two\n  roughly uncorrelated vectors lands near '
+                  '0.7x (mean) or 1.4x (sum) of a\n  single channel, and the '
+                  'head has no input normalisation.')
+
     print(f'\nDone. {n_saved} embeddings in {out_dir} at {dimension} dims.')
     if want_3di:
         print(f'{n_masked} of them have a zero 3Di channel (no usable structure).')
@@ -305,6 +379,20 @@ def main():
                              '3Di string. Same dimensionality, same mask pattern, '
                              'no real structural correspondence. A structure '
                              'effect has to beat this, not just the AA arm.')
+    parser.add_argument('--fuse', choices=['concat', 'renorm', 'sum', 'mean'],
+                        default='concat',
+                        help='How to combine the AA and 3Di channels. '
+                             'concat (default) gives 2048 dims and widens conv1 '
+                             'by 98,304 parameters (+51%% on the head). '
+                             'renorm, sum and mean all stay at 1024 dims, so the '
+                             'model is byte-identical to the sequence-only arm. '
+                             'PREFER renorm: it adds the channels and rescales '
+                             'each token to the AA channel\'s norm, so proteins '
+                             'with and without a structure arrive at the same '
+                             'scale. Raw sum (~1.43x) and mean (~0.72x) leave '
+                             'the ~12% with no structure at 1.00x, splitting the '
+                             'dataset into two scale regimes in a head that has '
+                             'no input normalisation.')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for --shuffle_3di. Recorded in extraction_config.json.')
     parser.add_argument('--model', default='Rostlab/ProstT5')
@@ -317,7 +405,7 @@ def main():
 
     generate(args.fasta_file, args.output_dir, args.three_di, args.tracks,
              args.shuffle_3di, args.model, args.half, args.max_residues,
-             args.max_seq_len, args.max_batch, args.seed)
+             args.max_seq_len, args.max_batch, args.seed, args.fuse)
 
 
 if __name__ == '__main__':

@@ -68,15 +68,16 @@ python -m src.utils.make_embeddings_prost5_struct \
     data/protein_sequences.fasta embeddings/prost5_3di \
     --tracks 3di --three_di three_di/three_di.json
 
-# both
+# both, fused at 1024 dims so the model stays byte-identical to the
+# sequence-only arm -- see FUSION.md for why renorm rather than sum or mean
 python -m src.utils.make_embeddings_prost5_struct \
-    data/protein_sequences.fasta embeddings/prost5_aa3di \
-    --tracks aa+3di --three_di three_di/three_di.json
+    data/protein_sequences.fasta embeddings/prost5_fused \
+    --tracks aa+3di --fuse renorm --three_di three_di/three_di.json
 
-# the control: same 2048 dims, same mask pattern, wrong structures
+# the control: same architecture, same mask pattern, wrong structures
 python -m src.utils.make_embeddings_prost5_struct \
-    data/protein_sequences.fasta embeddings/prost5_aa3di_shuf \
-    --tracks aa+3di --three_di three_di/three_di.json --shuffle_3di
+    data/protein_sequences.fasta embeddings/prost5_fused_shuf \
+    --tracks aa+3di --fuse renorm --three_di three_di/three_di.json --shuffle_3di
 ```
 
 Then, before training anything:
@@ -110,9 +111,12 @@ Powered at 80%, two-sided α = 0.05, using ProstT5's own replicate sd of 0.0306:
 across four arms. Detecting 0.02 is out of reach at this variance and should not
 be attempted — say so rather than running 38 and calling it exploratory.
 
+Every arm below is 1024 dims, so `--embedding_dim` is the same for all of them
+and the model is the original one throughout.
+
 ```bash
-for arm in prost5_aa prost5_3di prost5_aa3di prost5_aa3di_shuf; do
-  dim=1024; case $arm in *aa3di*) dim=2048;; esac
+for arm in prost5_aa prost5_3di prost5_fused prost5_fused_shuf; do
+  dim=1024
   for rep in $(seq 1 8); do
     python run.py --embeddings_dir embeddings/$arm \
       -df data/labeled_sequences.csv -pf data/graphpart_assignments.csv \
@@ -126,12 +130,10 @@ done
 
 ### 3. Read it in this order
 
-1. **`aa+3di` vs `aa+3di_shuffled`.** This is the result. It is the only pair
-   that isolates structural *information*; everything else is confounded with
-   input dimensionality. Concretely: at the default head geometry the 1024-dim
-   arm trains 192,369 parameters and the 2048-dim arm trains 290,673, a 51%
-   increase in head capacity that the shuffled control also gets and the
-   sequence-only arm does not.
+1. **fused vs fused-shuffled.** This is the result. It is the only pair that
+   isolates structural *information* rather than the presence of a second
+   channel. With `--fuse renorm` both arms are 1024 dims and the model is the
+   original one, so there is no capacity difference anywhere in the comparison.
 2. **`aa+3di` vs `aa`.** Real but weaker: 2048 dims against 1024 changes the
    head's capacity as well as its information.
 3. **`3di` vs `aa`.** How much of the task is structural at all. Expect it to
@@ -145,6 +147,17 @@ still holding ±3 so existing readers and every number in RESULTS.md stay valid.
 constrains *where* a cleavage site can be, so it should sharpen boundary
 placement before it changes whether a site is found at all. A gain that appears
 at ±3 but not at ±1 is more likely extra head capacity than better geometry.
+
+## Keeping the original architecture
+
+`--fuse renorm` keeps the input at 1024 dims, so every arm above builds a model
+byte-identical to `prost5-propeptide` — same 51-state CRF, same constraint mask,
+192,369 parameters. `test_architecture.py` asserts it.
+
+`--fuse concat` is the 2048-dim version. It widens `conv1` by 98,304 parameters
+and changes nothing else. It is worth running as a second experiment, not as the
+primary one, because a gain there is confounded with head capacity in a way the
+fused arms are not. [FUSION.md](FUSION.md) has the trade-off in full.
 
 ## What would make this branch's result unpublishable
 
