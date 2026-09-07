@@ -1,64 +1,88 @@
 # The plan
 
-One document. Where it disagrees with anything else in this repository, this one
-wins. Steps run in order, each has a gate, and a failed gate has a written
-consequence so the plan does not get renegotiated mid-run.
+Three representation arms, one grammar, one head, one branch. Steps run in
+order, each has a gate, and a failed gate has a written consequence.
 
-## The goal, stated once
+Where this disagrees with `PAPER.md`, `GRAMMAR.md`, `DATASET_V2.md` or either
+`NEXT_STEPS.md`, this wins.
 
-**Beat 0.6153 on this benchmark.** That is ESM-2 at T4, sd 0.0242, n=10
-(`esm2_rep*`), the best well-estimated arm in the study. Not `esm2_prop_final`
-at 0.6262, which is a single run sitting inside that group's band.
+## The design
 
-At 8 replicates a resolvable win needs about **0.650**.
+| arm | input | dims | embeddings |
+|---|---|---|---|
+| **1 baseline** | ESM-2, sequence only | 1280 | already on disk |
+| 2 | ESM3, sequence + structure tracks | 1536 | `make_embeddings_esm3_struct.py` |
+| 3 | ProstT5, sequence + 3Di | 1024 or 2048 | `make_embeddings_prost5_struct.py` |
 
-Metric throughout: segment-level propeptide F1 at ±3, micro-averaged on cluster
-4. ±1 is recorded on every run and reported alongside, never selected on.
+Every arm: **101 CRF states** (`--max_peptide_len 100`), propeptide-only labels
+(background, propeptide), T4 hyperparameters, same data, same splits, same head.
+Only the embeddings change.
 
-## Settled. Do not reopen.
+## The number to beat
 
-| question | answer |
-|---|---|
-| CRF grammar | 51 states now; 101 (5..100) if step 1 clears. Never 151 |
-| architecture | unchanged; `test_architecture.py` enforces it |
-| min length | stays at 5 — below it is CAAX, a different reaction |
-| where structure goes first | ESM-2, the arm that is already winning |
-| dataset rebuild | separate project, after this one |
-| tolerances | both, ±3 selects |
+**ESM-2, sequence only, 101 states, T4.** That run is in flight now as
+`esm2_g101_rep1..4`. It is the baseline because it is the only one that differs
+from the other arms in exactly one thing — the representation.
 
-## Step 0 — per-mechanism rescoring · DONE
+The 51-state figure of 0.6153 is **not** the target. Comparing a 101-state arm
+against it would confound grammar with representation.
 
-`score_by_mechanism.py` over the 10 ESM-2 replicates. No GPU.
+Fill the baseline to 8 replicates before reading any other arm against it.
 
-Result: convertase 0.7073, zymogen 0.6813, unassigned 0.5503 at ±3. Spread 0.157
-against a within-class sd of 0.021–0.040. At ±1 the ranking **reverses** —
-convertase falls to 0.3791, the worst class. The pooled 0.6153 describes no
-subgroup.
+## One branch, not three
 
-**This is a result the paper keeps regardless of what follows.** It is the
-fallback spine if every structure arm fails.
+This is `paper-3arm`, and all three arms run from it.
 
-## Step 1 — grammar ablation · RUNNING
+`esm3-multimodal` and `prost5-multimodal` have **different training code** —
+`train_loop_crf.py`, `crf_models.py`, `dataset.py` and `manuscript_metrics.py`
+all differ between them. Running arm 3 on one branch and arms 1–2 on the other
+would vary the training loop alongside the representation, and no amount of
+replication fixes that. `RESULTS.md` already warns against comparing F1 across
+branches.
 
-4 replicates of ESM-2 at 101 states on unchanged data, where states 51–100 can
-never be visited by a label.
+So this branch carries every extractor, and the arms are told apart by
+`--embeddings_dir`, never by which code produced them.
+
+## Each arm needs its own sequence-only control
+
+Arms 2 and 3 get **two** comparisons, and the second is what makes the work
+publishable if the first fails:
+
+- **against arm 1** — is this the best representation? Your bar.
+- **against its own sequence-only self at 101 states** — did structure help?
+
+At 51 states, ESM3 sequence-only scores 0.5227 and ProstT5 0.5189, against
+ESM-2's 0.6153. Both start about 0.09 behind. If ESM3 + structure lands at 0.55
+it loses to arm 1, but if ESM3 sequence-only at 101 states lands at 0.52, that
+same run is **+0.03 from structure** and is a real result. Without the
+within-arm control you cannot tell those apart, and the whole arm is wasted.
+
+Those controls cost 8 runs each and their embeddings already exist on disk.
+
+## Steps
+
+### Step 0 — per-mechanism rescoring · DONE, no GPU
+
+Convertase 0.7073, zymogen 0.6813, unassigned 0.5503 at ±3, against a within-class
+sd of 0.021–0.040. At ±1 the order reverses and convertase becomes the worst
+class at 0.3791. The pooled number describes no subgroup.
+
+**Keep this whatever else happens.** It is the paper's spine if every structure
+arm fails.
+
+### Step 1 — the baseline · 8 runs · IN FLIGHT
 
 ```bash
-python -m src.utils.summarize_results results/
+bash run_grammar_ablation.sh 10 100 results/esm2_rep1/config.json
 ```
 
-**Gate.** Compare the `esm2_g101_rep*` group against `esm2_rep*` at 0.6153.
+Skips the four already done and fills to ten.
 
-- within ~0.02 → the wider grammar is free. Proceed, and the paper may use 101
-  states later.
-- clearly lower → the enlarged transition matrix costs accuracy by itself. Stay
-  at 51 states for everything below, and record it as a finding: a duration-coded
-  CRF does not scale for free.
+**Gate.** None. This *is* the baseline; there is no result that stops the study.
+But record it against the 51-state 0.6153, because a large drop is itself a
+finding about duration-coded CRFs.
 
-Either way **step 2 proceeds**. The grammar question does not block the structure
-question.
-
-## Step 2 — build the structural channel · CPU only
+### Step 2 — structures and 3Di · CPU only, run alongside step 1
 
 ```bash
 pip install mini3di biotite
@@ -66,99 +90,74 @@ python -m src.utils.fetch_afdb_structures --out_dir structures/
 python -m src.utils.make_3di --structures_dir structures/ --out_dir three_di/
 ```
 
-~8,000 downloads, so hours, but no GPU. Then:
+**Gate.** `make_3di` must report ≥80% `ok`. Near zero means the manifest is wrong
+and every downstream arm is a sequence-only run wearing a structure arm's name.
+
+### Step 3 — the two sequence-only controls · 16 runs
+
+ESM3 and ProstT5, sequence only, at 101 states. Embeddings already exist.
+
+**Gate.** None. These are controls; they cannot fail, only inform.
+
+### Step 4 — the structure arms · 16 runs
 
 ```bash
-python -m src.utils.make_hybrid_embeddings \
-    --base_dir /mnt/storage/fysekidis/embeddings/esm2 \
-    --three_di three_di/three_di.json --out_dir embeddings/esm2_3di --mode onehot
-python -m src.utils.make_hybrid_embeddings \
-    --base_dir /mnt/storage/fysekidis/embeddings/esm2 \
-    --three_di three_di/three_di.json --out_dir embeddings/esm2_3di_shuf \
-    --mode onehot --shuffle
+python -m src.utils.make_embeddings_esm3_struct \
+    --structures_dir structures/ --out_dir embeddings/esm3_struct \
+    --gpu_max_len 2000 --max_struct_len 1024
+
+python -m src.utils.make_embeddings_prost5_struct \
+    data/protein_sequences.fasta embeddings/prost5_fused \
+    --tracks aa+3di --fuse renorm --three_di three_di/three_di.json
 ```
 
-**Gate.** `make_3di` must report ≥80% `ok`. Near zero means the manifest is
-wrong and everything downstream is a sequence-only run wearing a structure arm's
-name. Stop and fix.
+`--fuse renorm` keeps ProstT5 at 1024 dims so its head matches its own control
+exactly. ESM3 is 1536 whatever tracks it is fed, so it needs no such choice.
 
-## Step 3 — ESM-2 + 3Di, the main bet · 16 runs
+8 replicates each.
 
-1300 dims: ESM-2's 1280 plus 20 one-hot structural. Head grows 1.6%, so a gain
-cannot be dismissed as capacity.
+**Gate, and this is the decision point.**
 
-Replay the T4 config and change only the embeddings, exactly as the grammar
-ablation does:
+- **either arm beats arm 1** → the headline. Go to step 5.
+- **neither beats arm 1, but one beats its own sequence-only control** → structure
+  helps, this representation does not win. Publishable, and the honest framing.
+  Go to step 5.
+- **neither beats arm 1 nor its own control** → structure does not move this task.
+  **Stop.** The paper is step 0 plus a well-controlled negative. Skip to step 6.
+
+### Step 5 — scrambled controls and per-mechanism breakdown · 8 runs + no GPU
+
+Only for whichever arm moved.
 
 ```bash
-bash run_grammar_ablation.sh 8 50 results/esm2_rep1/config.json
-```
-with `PREFIX=esm2_3di_rep` and the embeddings directory overridden — or write the
-8 commands from `results/esm2_rep1/config.json` with `--embeddings_dir
-embeddings/esm2_3di --embedding_dim 1300`. Then 8 more against
-`embeddings/esm2_3di_shuf`.
-
-**Gate, and this is the one that decides the paper.**
-
-- **≥ 0.650 and beats the shuffled control** → the headline. Go to step 4.
-- **≥ 0.650 but the shuffled control matches it** → the gain is the extra
-  20 dimensions, not structure. Report it as such. Go to step 5.
-- **< 0.650** → structure does not clear the bar on ESM-2. **Stop building
-  structure arms.** The paper becomes the mechanism-decomposition paper from step
-  0 plus a documented negative result, which is publishable and honest. Skip to
-  step 6.
-
-## Step 4 — the richer channel · 16 runs, only if step 3 cleared
-
-`--mode prostt5` gives 2304 dims. Confounded with capacity, which is why it is
-second and not first, and why it needs its own shuffled control.
-
-**Gate.** Beats the 1300-dim arm → report both and prefer the small one for the
-claim. Does not → the 20-dim alphabet was enough, which is a cleaner result.
-
-## Step 5 — per-mechanism breakdown · no GPU
-
-```bash
-python -m src.utils.score_by_mechanism results/esm2_3di_rep*/test_outputs.pickle
+python -m src.utils.make_embeddings_esm3_struct ... --scramble_structure
+python -m src.utils.make_embeddings_prost5_struct ... --shuffle_3di
+python -m src.utils.score_by_mechanism results/<arm>_rep*/test_outputs.pickle --end_state 100
 ```
 
-The prediction, from `PAPER.md`: structure helps least on convertase sites and
-most on zymogen prodomains. If that ordering appears it is mechanistically
-interpretable and it is the figure. If the gain is flat across mechanisms, say so
-— a uniform gain is a weaker but still real result.
+Beating the sequence-only control says the extra track helped. Beating the
+**scrambled** control says *structure* helped. Only the second supports a
+mechanistic claim.
 
-## Step 6 — write up whatever is true
+Prediction from `PAPER.md`: least gain on convertase, most on zymogen prodomains.
 
-Two outcomes are already publishable:
-
-1. Structure clears the bar. Headline is the model; step 0 explains where the
-   gain lives.
-2. Structure does not. Headline is step 0 — `PROPEP` pools three mechanisms, the
-   pooled metric describes no subgroup, the ranking reverses with tolerance —
-   with the structure arms as a well-controlled negative.
-
-Only then consider the dataset rebuild in `PAPER.md`. It is a second paper.
-
-## What is deliberately NOT in this plan
-
-- ESM3 and ProstT5 structure arms. They need +0.127 and +0.131 to clear the bar,
-  larger than any effect measured in this study. They are ablations for a later
-  paper, not the headline.
-- SaProt. Worth adding, but it is a new dependency and a new arm; it belongs
-  after step 3 answers whether structure moves this task at all.
-- The 2..100 dataset rebuild. Separate project.
-- Equal-budget Optuna for ESM3 and ProstT5. That is the thesis's next step, not
-  the paper's.
+### Step 6 — write up whichever is true
 
 ## Run budget
 
 | step | runs | GPU |
 |---|---|---|
-| 0 | 0 | no |
-| 1 | 4 | yes, in flight |
-| 2 | 0 | no |
-| 3 | 16 | yes |
-| 4 | 16 | only if step 3 cleared |
-| 5 | 0 | no |
+| 1 baseline | 8 | in flight |
+| 3 seq-only controls | 16 | yes |
+| 4 structure arms | 16 | yes |
+| 5 scrambled controls | 8 | only for the arm that moved |
 
-Worst case 36 GPU runs. Step 3 is the one that matters.
+48 runs. Steps 0, 2 and the analyses need no GPU.
+
+## Deliberately excluded
+
+- **ESM-2 + 3Di.** It is the likeliest arm to beat 0.6153, needing +0.035 where
+  ESM3 and ProstT5 need +0.127 and +0.131. It is excluded because the chosen
+  design is three clean representation arms, not a hybrid. `make_hybrid_embeddings.py`
+  is on this branch if that decision is revisited.
+- SaProt, the 2..100 dataset rebuild, equal-budget Optuna. Later work.
