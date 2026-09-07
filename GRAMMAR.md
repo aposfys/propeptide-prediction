@@ -89,9 +89,39 @@ O(L · S²), so the cost column is the decode-time multiplier against 51 states.
 | 2..150 | 151 | 8.8× | 93.90% | 92.99% |
 | 2..262 | 263 | 26.6× | 98.99% | 98.82% |
 
-## The finding that matters
+## Correction, 2026-09-07: the floor is not the bargain it looks like
 
-**The floor costs more than the ceiling, and the floor is free.**
+The arithmetic below is right and the conclusion drawn from it was wrong.
+Lowering `min_len` to 2 does add 13.4 points of coverage at no extra states. But
+cutting the data by MECHANISM rather than by length shows what those points are:
+
+| mechanism | n | 2-4 aa | 5-50 | 51-105 | >105 |
+|---|---|---|---|---|---|
+| CAAX (prenylated, C-terminal) | 781 | **100.0%** | 0.0% | 0.0% | 0.0% |
+| convertase (dibasic keyword) | 3,963 | 7.9% | 64.2% | 15.3% | 12.6% |
+| zymogen, no dibasic | 2,215 | 4.3% | 43.5% | 26.8% | 25.4% |
+
+The CAAX class sits **entirely** below 5 residues, so lowering the floor imports
+a different reaction wholesale — RCE1 removing the aaX tripeptide after
+prenylation, with no dibasic site and no variable length.
+
+Raising the ceiling does the opposite. **27.9% of convertase-processed
+propeptides are longer than 50 residues**, so the cap is not selecting a
+mechanism, it is truncating one. Extending upward recovers members of the class
+the model already targets.
+
+So for a model of propeptide cleavage: **keep `min_len` at 5 and raise
+`max_len`.** With the floor fixed at 5, the convertase class is covered 64.2% at
+50, 79.5% at 105, 83.9% at 150 and 90.1% at 262. See
+[PAPER.md](PAPER.md).
+
+The section below is retained because the coverage arithmetic is still correct
+and is what the recommendation is computed from.
+
+## The coverage arithmetic
+
+**The floor costs more than the ceiling in raw coverage, and the floor is free
+in state count.**
 
 Of the 34.55% of annotations the current grammar cannot represent, 13.43 points
 are *too short* and 21.12 points are too long. The short tail is real and
