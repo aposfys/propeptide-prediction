@@ -60,6 +60,12 @@ set -euo pipefail
 FOLD=""
 OUT_DIR="results/esm3_prop_optuna"
 EMB_DIR="/data/apostolos/embeddings/esm3"
+# Was hardcoded to 1536 in two places. That silently made this an ESM3-only
+# script: preflight rejected any other embedding set, and the default leaked
+# into the search unless overridden by hand. Running an EQUAL search on three
+# arms is the whole point of tuning, so the dimension is now a parameter.
+EMB_DIM="1536"
+ARM_NAME="ESM3"
 PASSTHRU=()
 
 while [[ $# -gt 0 ]]; do
@@ -67,6 +73,8 @@ while [[ $# -gt 0 ]]; do
         --fold)            FOLD="$2";    shift 2 ;;
         --out_dir|-od)     OUT_DIR="$2"; shift 2 ;;
         --embeddings_dir)  EMB_DIR="$2"; shift 2 ;;
+        --embedding_dim)   EMB_DIM="$2"; shift 2 ;;
+        --arm)             ARM_NAME="$2"; shift 2 ;;
         *)                 PASSTHRU+=("$1"); shift ;;
     esac
 done
@@ -78,7 +86,7 @@ mkdir -p "$OUT_DIR" logs
 # otherwise fails much later with a misleading error.
 if [[ "${SKIP_PREFLIGHT:-0}" != "1" ]]; then
     echo "=== Preflight ==="
-    if ! python preflight.py --embeddings_dir "$EMB_DIR" --embedding_dim 1536 \
+    if ! python preflight.py --embeddings_dir "$EMB_DIR" --embedding_dim "$EMB_DIM" \
                              --out_dir "$OUT_DIR" --n_trials 30; then
         echo ""
         echo "Aborting: fix the problems above, or set SKIP_PREFLIGHT=1 to override."
@@ -94,7 +102,7 @@ DEFAULTS=(
     --embeddings_dir   "$EMB_DIR"
     --data_file        data/labeled_sequences.csv
     --partitioning_file data/graphpart_assignments.csv
-    --embedding_dim    1536
+    --embedding_dim    "$EMB_DIM"
     --model            lstmcnncrf
     --out_dir          "$OUT_DIR"
     --epochs           50
@@ -105,7 +113,7 @@ DEFAULTS=(
     --seed             42
 )
 
-echo "=== ESM3 propeptide Optuna search (GPU required) ==="
+echo "=== ${ARM_NAME} propeptide Optuna search (GPU required) ==="
 python - <<'PY' || exit 1
 import sys, torch
 if not torch.cuda.is_available():
@@ -118,8 +126,9 @@ print(f'  GPU        : {torch.cuda.get_device_name(0)} '
       f'({torch.cuda.get_device_properties(0).total_memory / 1e9:.0f} GB)')
 print(f'  torch/cuda : {torch.__version__} / {torch.version.cuda}')
 PY
+echo "  arm        : ${ARM_NAME}"
 echo "  out_dir    : ${OUT_DIR}"
-echo "  embeddings : ${EMB_DIR}"
+echo "  embeddings : ${EMB_DIR} (${EMB_DIM} dims)"
 echo ""
 
 run_fold () {
