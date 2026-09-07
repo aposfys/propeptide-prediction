@@ -12,3 +12,9 @@ tqdm==4.64.0
 transformers>=4.30.0
 sentencepiece
 protobuf
+
+# structure channel (make_3di.py). mini3di is a pure-Python reimplementation of
+# Foldseek's 3Di encoder, so no binary or conda environment is needed; pass
+# --encoder foldseek to use the reference implementation instead.
+mini3di
+biotite

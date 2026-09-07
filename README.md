@@ -1,13 +1,52 @@
-# DeepPeptide (ProstT5, propeptide-only)
-Predicting propeptide cleavage sites in protein sequences using ProstT5.
+# DeepPeptide (ProstT5, structure-conditioned, propeptide-only)
+Predicting propeptide cleavage sites using ProstT5 over **amino acids and
+Foldseek 3Di**, not amino acids alone.
+
+This branch is `prost5-propeptide` plus a structural input channel. ProstT5 is
+bilingual — it was trained to translate between residue sequences and 3Di
+structural strings — and the sequence-only arm used only one of those languages.
+Here both are encoded and concatenated to 2048 dims per residue, with the 3Di
+channel derived from AlphaFold DB models.
+
+**Nothing has been run on this branch yet.** It carries the extraction pipeline,
+the ablation design, the controls and the power calculation. The runs and their
+order are in [NEXT_STEPS.md](NEXT_STEPS.md). Do not read the table below as a
+result for the structure arm — it is the sequence-only baseline this arm has to
+beat.
 
 https://www.biorxiv.org/content/10.1101/2023.07.23.550085v1
 
 This branch restricts training and evaluation to the **propeptide label only**
 (states 1–50; state 0 = background). Mature peptide coordinates are ignored.
-The CRF head is hardcoded to 51 states and 2 label classes.
+The CRF head has 51 states and 2 label classes by default; the state count now
+follows `--max_peptide_len` rather than being hardcoded.
 
-Embedder: `Rostlab/ProstT5` (1024-dim per residue).
+Embedder: `Rostlab/ProstT5`. 1024 dims per residue per language, so 1024 for
+`--tracks aa` or `--tracks 3di`, and 2048 for `--tracks aa+3di`.
+
+### Arms on this branch
+
+| arm | `--tracks` | dims | what it is |
+|---|---|---|---|
+| sequence-only | `aa` | 1024 | reproduces `prost5-propeptide` |
+| structure-only | `3di` | 1024 | how much of the task is structural |
+| both | `aa+3di` | 2048 | the treatment |
+| **shuffled control** | `aa+3di --shuffle_3di` | 2048 | same dims, same mask, wrong structures |
+
+The shuffled control is not optional. Going from 1024 to 2048 dims doubles what
+the head can use whether or not the extra half means anything, so a gain over the
+sequence-only arm does not by itself show that structure helped.
+
+### Also on this branch
+
+- **Both boundary tolerances are scored.** Every run writes
+  `f1 propeptides@1` and `f1 propeptides@3` to `test_metrics.json`. The
+  unsuffixed `f1 propeptides` key still holds ±3, so every existing number and
+  reader is unaffected. Model selection still uses ±3.
+- **The CRF grammar is configurable** via `--min_peptide_len` / `--max_peptide_len`,
+  defaulting to the published 5..50 window. [GRAMMAR.md](GRAMMAR.md) measures what
+  that window covers in UniProt and what widening it would cost. `test_grammar.py`
+  asserts the defaults reproduce the published grammar exactly.
 
 ---
 
