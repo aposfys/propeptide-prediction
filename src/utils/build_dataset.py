@@ -58,14 +58,39 @@ import urllib.parse
 import urllib.request
 
 FIELDS = ('accession,protein_name,sequence,length,organism_name,fragment,'
-          'keyword,ft_propep,ft_peptide')
+          'keyword,ft_propep,ft_peptide,ft_signal,ft_transit')
 STREAM = 'https://rest.uniprot.org/uniprotkb/stream?query={q}&fields={f}&format=tsv'
 
 POSITIVE_QUERY = '(ft_propep:*) AND (reviewed:true)'
+# Two negative pools, and they are not interchangeable.
+#
+# HARD negatives are upstream's choice: proteins with a mature-peptide
+# annotation and no propeptide. They are known-cleaved precursors, so the model
+# cannot reject them on "this is not a precursor" alone. Current UniProt yields
+# ~830 of them after the protocol's filters, against upstream's 1,236 -- the gap
+# is curation, not filtering: 466 of upstream's negatives have since gained a
+# propeptide annotation, which is the positive-unlabeled problem measured.
+#
+# CONTEXT negatives are secreted proteins with a signal peptide and no
+# propeptide. They are the population a deployed model actually meets, and
+# DeepPeptide's own Table 3 shows the published model over-predicting badly on
+# whole proteomes -- 815 propeptides called in human against 394 annotated. A
+# negative set of 830 cannot discipline that.
 NEGATIVE_QUERY = '(ft_peptide:*) AND (reviewed:true) NOT (ft_propep:*)'
+CONTEXT_QUERY = '(ft_signal:*) AND (reviewed:true) NOT (ft_propep:*) NOT (ft_peptide:*)'
 
-FEATURE = re.compile(r'(PROPEP|PEPTIDE)\s+([?<>]?\d+|\?)\.\.([?<>]?\d+|\?)')
+FEATURE = re.compile(r'(PROPEP|PEPTIDE|SIGNAL|TRANSIT)\s+([?<>]?\d+|\?)\.\.([?<>]?\d+|\?)')
 VIRAL = re.compile(r'virus|viral|phage|viroid', re.I)
+
+# One chunk per feature, so each keeps its own /evidence block. Needed because
+# the ProRule filter below is per-feature, not per-protein.
+CHUNK = re.compile(r'(PROPEP)\s+([?<>]?\d+|\?)\.\.([?<>]?\d+|\?)(.*?)(?=PROPEP\s|\Z)', re.S)
+
+# Teufel et al.: "We removed sorting signals that are annotated as propeptides by
+# PROSITE ProRules PRU00477 and PRU01070." These are not propeptides in the sense
+# of the task -- they are targeting signals that happen to share the feature key.
+# 202 and 93 features respectively carry these in current reviewed UniProt.
+SORTING_SIGNAL_RULES = ('PRU00477', 'PRU01070')
 
 
 def fetch(query, cache_path):
@@ -133,6 +158,14 @@ def main():
     parser.add_argument('--limit', type=int, default=0,
                         help='Keep only the first N of each class, for a smoke test.')
     parser.add_argument('--no_negatives', action='store_true')
+    parser.add_argument('--negative_ratio', type=float, default=0.146,
+                        help='Negatives as a fraction of positives. 0.146 is the '
+                             'published ratio (1,236 of 8,449). Hard negatives are '
+                             'used first and context negatives top up the rest; if '
+                             'the hard pool alone already exceeds the target, no '
+                             'context negatives are drawn.')
+    parser.add_argument('--no_context_negatives', action='store_true',
+                        help='Use only the hard pool, whatever ratio that gives.')
     parser.add_argument('--max_negatives', type=int, default=0,
                         help='Cap the negative set, sampled with --seed. The full '
                              'pool is 4,781 against 8,800 positives (35%% negative), '
@@ -153,9 +186,13 @@ def main():
 
     print('Positives:')
     positive_raw = fetch(POSITIVE_QUERY, cache('build_positives.tsv'))
-    print('Negatives:')
+    print('Negatives (hard: peptide-annotated, no propeptide):')
     negative_raw = ('' if args.no_negatives
                     else fetch(NEGATIVE_QUERY, cache('build_negatives.tsv')))
+    context_raw = ''
+    if not args.no_negatives and not args.no_context_negatives:
+        print('Negatives (context: signal peptide, no propeptide, no peptide):')
+        context_raw = fetch(CONTEXT_QUERY, cache('build_context.tsv'))
 
     rows, mechanisms = [], {}
     stats = collections.Counter()
@@ -174,7 +211,18 @@ def main():
             return
         keywords = {k.strip() for k in (record.get('Keywords') or '').split(';') if k.strip()}
 
-        propeptides = spans_of(record.get('Propeptide'), 'PROPEP')
+        # Drop sorting signals mis-keyed as propeptides, per the published
+        # protocol. Matched on the feature's own evidence block.
+        propeptides = []
+        for match in CHUNK.finditer(record.get('Propeptide') or ''):
+            start, end, tail = match.group(2), match.group(3), match.group(4)
+            if '?' in start or '?' in end:
+                continue
+            if any(rule in tail for rule in SORTING_SIGNAL_RULES):
+                stats['sorting_signal_dropped'] += 1
+                continue
+            propeptides.append((int(start.lstrip('<>')), int(end.lstrip('<>'))))
+
         dropped_caax = [s for s in propeptides if is_caax(s, keywords, chain_length)]
         propeptides = [s for s in propeptides if s not in dropped_caax]
         stats['caax_spans_dropped'] += len(dropped_caax)
@@ -196,8 +244,21 @@ def main():
             stats['negative_has_propeptide'] += 1
             return
 
+        # Teufel et al.: "We discarded all proteins that are annotated with a
+        # peptide that covers the full-length range of the mature protein, as
+        # these are not peptides in the sense of being proteolytically released
+        # from a precursor protein. The same was done for all peptides that have
+        # full coverage together with an annotated signal or transit peptide."
         peptides = [s for s in spans_of(record.get('Peptide'), 'PEPTIDE')
                     if 1 <= s[0] <= s[1] <= chain_length]
+        leader_end = 0
+        for kind in ('Signal peptide', 'Transit peptide'):
+            for span in spans_of(record.get(kind), kind.split()[0].upper()):
+                leader_end = max(leader_end, span[1])
+        for start, end in peptides:
+            if end >= chain_length and (start <= 1 or start <= leader_end + 1):
+                stats['peptide_covers_whole_chain'] += 1
+                return
         propeptides = [s for s in propeptides if 1 <= s[0] <= s[1] <= chain_length]
 
         rows.append({
@@ -224,6 +285,30 @@ def main():
             kept += len(rows) - before
             if args.limit and kept >= args.limit:
                 break
+
+    n_positive = stats['positives']
+    target = int(round(n_positive * args.negative_ratio))
+    if context_raw and stats['negatives'] < target:
+        # Context negatives have no peptide annotation at all, so the
+        # whole-chain-coverage rule cannot apply to them and consider() would
+        # never reject them for it. They still go through the fragment, viral and
+        # propeptide checks.
+        import random
+        pool = [r for r in csv.DictReader(io.StringIO(context_raw), delimiter='\t')]
+        random.Random(args.seed).shuffle(pool)
+        need = target - stats['negatives']
+        added = 0
+        for record in pool:
+            if added >= need:
+                break
+            before = len(rows)
+            consider(record, False)
+            if len(rows) > before:
+                mechanisms[record['Entry']] = 'negative_context'
+                added += 1
+        stats['context_negatives'] = added
+        print(f'  added {added} context negatives to reach a '
+              f'{args.negative_ratio:.3f} ratio')
 
     if not rows:
         raise SystemExit('Nothing passed the filters. Check the queries and cache.')
