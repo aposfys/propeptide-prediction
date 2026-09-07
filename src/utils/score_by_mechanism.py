@@ -53,49 +53,87 @@ STREAM = ('https://rest.uniprot.org/uniprotkb/stream'
           '&fields=accession%2Ckeyword&format=tsv')
 
 
-def load_keywords(cache_path):
-    '''accession -> set of UniProt keywords.'''
+# Shipped so this needs no network. Regenerate it with --refresh when UniProt
+# has moved on. It is 252 KB and covers every reviewed accession carrying a
+# PROPEP feature, which is a superset of anything in the benchmark.
+MECHANISM_TABLE = 'data/propeptide_mechanism.tsv'
+
+
+def load_mechanisms(table_path, cache_path, refresh):
+    '''accession -> mechanism label.
+
+    Prefers the shipped table. The GPU nodes this runs on are busy and often
+    firewalled, and a 13k-row lookup has no business being a network call every
+    time -- the earlier version pulled the whole keyword set from UniProt on
+    every invocation, which is what made this unusable mid-job.
+    '''
+    if not refresh and os.path.isfile(table_path):
+        out = {}
+        with open(table_path) as handle:
+            next(handle)
+            for line in handle:
+                accession, mechanism_label = line.rstrip('\n').split('\t')
+                out[accession] = mechanism_label
+        return out
+
     if cache_path and os.path.isfile(cache_path):
         raw = open(cache_path, encoding='utf-8').read()
     else:
-        print('Fetching UniProt keywords...')
+        print('Fetching UniProt keywords (only needed with --refresh)...')
         with urllib.request.urlopen(STREAM, timeout=600) as response:
             raw = response.read().decode('utf-8')
         if cache_path:
             open(cache_path, 'w', encoding='utf-8').write(raw)
+
     out = {}
     for row in csv.DictReader(io.StringIO(raw), delimiter='\t'):
-        out[row['Entry']] = {k.strip() for k in (row.get('Keywords') or '').split(';')
-                             if k.strip()}
+        keywords = {k.strip() for k in (row.get('Keywords') or '').split(';') if k.strip()}
+        if 'Cleavage on pair of basic residues' in keywords:
+            out[row['Entry']] = 'convertase'
+        elif 'Zymogen' in keywords or 'Protease' in keywords:
+            out[row['Entry']] = 'zymogen_protease'
+        else:
+            out[row['Entry']] = 'unassigned'
+    if refresh:
+        with open(table_path, 'w') as handle:
+            handle.write('accession\tmechanism\n')
+            for accession, mechanism_label in sorted(out.items()):
+                handle.write(f'{accession}\t{mechanism_label}\n')
+        print(f'refreshed {table_path} ({len(out)} accessions)')
     return out
 
 
-def mechanism(accession, keywords):
-    '''Assign one mechanism label, in priority order.
+# Priority matters and is baked into the table: proteases that are themselves
+# convertase-processed exist, and the dibasic keyword is the more specific
+# statement about how THIS protein's propeptide is removed, so it wins.
+# "unassigned" is honestly unassigned -- only about 28% of 5-50 features carry
+# the dibasic keyword -- and must not be read as a fourth mechanism.
+def mechanism(accession, table, has_label):
+    '''Mechanism for a protein, or why it has none.
 
-    Priority matters: proteases that are themselves convertase-processed exist,
-    and the dibasic keyword is the more specific statement about how THIS
-    protein's propeptide is removed, so it wins. "unassigned" is honestly
-    unassigned -- only about 28% of 5-50 features carry the dibasic keyword --
-    and must not be read as a fourth mechanism.
+    The two ways of having no mechanism are NOT the same thing and must not share
+    a row. A protein the benchmark labels negative has no propeptide to classify
+    and contributes only false positives; a protein whose annotation UniProt has
+    since withdrawn had one in 2022 and does not now. Pooling them produced a
+    "not in current UniProt: n=138, spans=2" row whose F1 of 0.0000 meant
+    nothing, because 136 of those 138 were simply negatives.
     '''
-    kw = keywords.get(accession)
-    if kw is None:
-        return 'not in current UniProt'
-    if 'Cleavage on pair of basic residues' in kw:
-        return 'convertase (dibasic)'
-    if 'Zymogen' in kw or 'Protease' in kw:
-        return 'zymogen / protease'
-    return 'unassigned'
+    label = table.get(accession)
+    if label is not None:
+        return label
+    return 'annotation withdrawn' if has_label else 'negative (no propeptide)'
 
 
-def score_one(path, frame, keywords, tolerances, end_state):
+def score_one(path, frame, table, tolerances, end_state):
     '''Per-mechanism metrics for one test_outputs.pickle.'''
     probs, preds, labels, names = pickle.load(open(path, 'rb'))
     names = list(names)
     groups = collections.defaultdict(list)
     for i, name in enumerate(names):
-        groups[mechanism(str(name), keywords)].append(i)
+        accession = str(name)
+        has_label = bool(len(frame.loc[accession, 'true_propeptides'])) \
+            if accession in frame.index else False
+        groups[mechanism(accession, table, has_label)].append(i)
 
     out = {}
     for label, index in sorted(groups.items()):
@@ -111,6 +149,9 @@ def score_one(path, frame, keywords, tolerances, end_state):
             [labels[i] for i in index] if isinstance(labels, list) else labels[index],
             subset_names, subset, windows=tolerances, **extra)
         n_spans = int(sum(len(x) for x in subset['true_propeptides']))
+        # A group with no true spans has no recall to report; whatever the model
+        # predicts there is a false positive by construction. F1 is 0 or
+        # undefined and printing it as a score invites misreading.
         out[label] = {'n_proteins': len(index), 'n_spans': n_spans,
                       'metrics': dict(zip(tolerances, per_window))}
     return out
@@ -121,7 +162,12 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('pickles', nargs='+', help='One or more test_outputs.pickle.')
     parser.add_argument('--data_file', default='data/labeled_sequences.csv')
-    parser.add_argument('--cache', default='propep_rich.tsv')
+    parser.add_argument('--mechanism_table', default=MECHANISM_TABLE,
+                        help='Shipped accession -> mechanism table. No network needed.')
+    parser.add_argument('--refresh', action='store_true',
+                        help='Rebuild the table from UniProt. Only this needs a network.')
+    parser.add_argument('--cache', default='propep_rich.tsv',
+                        help='Optional raw UniProt TSV, used only with --refresh.')
     parser.add_argument('--tolerances', default='1,3')
     parser.add_argument('--end_state', type=int, default=50,
                         help="Last propeptide state of the grammar the run used, "
@@ -141,13 +187,17 @@ def main():
     frame['true_propeptides'] = [parse_coordinate_string(x, merge_overlaps=True)
                                  for x in frame['propeptide_coordinates'].tolist()]
     frame['true_peptides'] = [[] for _ in range(len(frame))]
-    keywords = load_keywords(args.cache)
+    table = load_mechanisms(args.mechanism_table, args.cache, args.refresh)
 
     per_run = {}
     for path in args.pickles:
-        per_run[path] = score_one(path, frame, keywords, tolerances, args.end_state)
+        per_run[path] = score_one(path, frame, table, tolerances, args.end_state)
         print(f'\n=== {path} ===')
         for label, entry in per_run[path].items():
+            if entry['n_spans'] == 0:
+                fp = ' (no true spans: F1 is undefined, only false positives possible)'
+                print(f'  {label:24} n={entry["n_proteins"]:5} spans={entry["n_spans"]:5}{fp}')
+                continue
             row = ' '.join(
                 f'F1@{t}={entry["metrics"][t]["f1 propeptides"]:.4f}' for t in tolerances)
             print(f'  {label:24} n={entry["n_proteins"]:5} spans={entry["n_spans"]:5}  {row}')
@@ -156,6 +206,8 @@ def main():
         print(f'\n=== aggregate over {len(per_run)} runs (mean, sd) ===')
         labels = sorted({k for r in per_run.values() for k in r})
         for label in labels:
+            if all(r[label]['n_spans'] == 0 for r in per_run.values() if label in r):
+                continue
             for t in tolerances:
                 values = [r[label]['metrics'][t]['f1 propeptides']
                           for r in per_run.values() if label in r]
