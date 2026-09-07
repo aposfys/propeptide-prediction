@@ -59,6 +59,39 @@ within-arm control you cannot tell those apart, and the whole arm is wasted.
 
 Those controls cost 8 runs each and their embeddings already exist on disk.
 
+## The dataset moves with the grammar
+
+A 101-state grammar on 5..50 data leaves half its states unvisited, so the
+benchmark is rebuilt at 5..100 by `src/utils/build_dataset.py`.
+
+| | current | rebuilt |
+|---|---|---|
+| positives | 6,392 | **8,800** |
+| propeptide spans | 8,201 | **9,900** |
+| negatives | 1,231 | 4,781 (or `--max_negatives 1700` for the old ratio) |
+| longest representable span | 50 | 100 |
+
+Filters, each for a stated reason: reviewed only, no fragments, no viruses — the
+last two are Teufel et al.'s own exclusions, visible in their file and stated
+nowhere in this repository. The floor stays at 5 because every CAAX feature is
+shorter than that and CAAX is a different reaction. The ceiling rises to 100
+because 27.9% of convertase-processed propeptides exceed 50.
+
+CAAX spans are dropped but **their proteins are kept**. A protein whose
+propeptide falls outside 5..100 is rejected **entirely**, rather than keeping it
+with that span unlabelled — which is the defect `DATASET.md` measures in the
+distributed benchmark, where 548 proteins carry 715 propeptides their labels
+omit. That costs 2,400 proteins and buys clean ground truth.
+
+Only **1,674 of the 8,800 positives are new**, so 81% of the embeddings already
+exist and extraction is incremental. GraphPart runs at ~1.6× the old pairwise
+load, not 3.5×.
+
+**Consequence for the run in flight.** `esm2_g101_rep*` is on the OLD data. It is
+a clean grammar ablation and worth finishing for that, but it is **not** the
+paper baseline. The baseline is ESM-2 sequence-only at 101 states **on the
+rebuilt data**.
+
 ## Steps
 
 ### Step 0 — per-mechanism rescoring · DONE, no GPU
@@ -70,17 +103,27 @@ class at 0.3791. The pooled number describes no subgroup.
 **Keep this whatever else happens.** It is the paper's spine if every structure
 arm fails.
 
-### Step 1 — the baseline · 8 runs · IN FLIGHT
+### Step 1 — build the dataset · CPU only
+
+```bash
+python -m src.utils.build_dataset --out_dir data_v2
+graphpart needle -ff data_v2/protein_sequences.fasta -th 0.3 -pa 5 \
+    -on data_v2/graphpart_assignments.csv
+```
+
+**Gate.** GraphPart must retain ≥85%. The distributed benchmark retained 90%
+(7,623 of 8,449). A much lower rate means the added proteins are homologous
+clumps and the partitions are unbalanced; report the retention either way.
+
+### Step 1b — finish the grammar ablation · 6 runs · IN FLIGHT
 
 ```bash
 bash run_grammar_ablation.sh 10 100 results/esm2_rep1/config.json
 ```
 
-Skips the four already done and fills to ten.
-
-**Gate.** None. This *is* the baseline; there is no result that stops the study.
-But record it against the 51-state 0.6153, because a large drop is itself a
-finding about duration-coded CRFs.
+Fills the in-flight four to ten. This measures the grammar's cost on unchanged
+data, which is worth knowing and cannot be recovered later once the dataset
+moves. It is **not** the paper baseline.
 
 ### Step 2 — structures and 3Di · CPU only, run alongside step 1
 
@@ -147,12 +190,14 @@ Prediction from `PAPER.md`: least gain on convertase, most on zymogen prodomains
 
 | step | runs | GPU |
 |---|---|---|
-| 1 baseline | 8 | in flight |
-| 3 seq-only controls | 16 | yes |
+| 1 build dataset + GraphPart | 0 | no |
+| 1b finish grammar ablation | 6 | in flight |
+| 2 structures, 3Di, embeddings | 0 training | extraction only |
+| 3 baseline + 2 seq-only controls | 24 | yes |
 | 4 structure arms | 16 | yes |
 | 5 scrambled controls | 8 | only for the arm that moved |
 
-48 runs. Steps 0, 2 and the analyses need no GPU.
+54 runs plus embedding extraction for 1,674 new sequences across three models.
 
 ## Deliberately excluded
 
