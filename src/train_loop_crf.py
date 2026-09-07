@@ -50,8 +50,16 @@ def flatten_tolerances(metrics_per_window):
     return flat
 
 
-def score(probs, preds, labels, loader, args):
-    '''Metrics at every tolerance, with the selection tolerance unsuffixed.'''
+def score_at_tolerances(probs, preds, labels, loader, args):
+    '''Metrics at every tolerance, with the selection tolerance unsuffixed.
+
+    NOT named `score`. Two functions in this module already bind a local
+    variable of that name -- `run_training_for_params` at the epoch loop and
+    the Optuna objective wrapper -- and a module-level `score` is shadowed by
+    those bindings for the whole function body, so the call ABOVE the
+    assignment raises UnboundLocalError. That is not a name clash the import
+    machinery or a syntax check can catch; it only appears when the code runs.
+    '''
     per_window = compute_all_metrics(
         probs, preds, labels, loader.dataset.names, loader.dataset.data,
         windows=TOLERANCES, end_state=getattr(args, 'max_peptide_len', 50))
@@ -362,7 +370,7 @@ def run_training_for_params(
             valid_loader, model, optimizer, writer, do_train=False,
             collect_probs=False,
         )
-        valid_metrics = score(valid_probs, valid_preds, valid_labels, valid_loader, args)
+        valid_metrics = score_at_tolerances(valid_probs, valid_preds, valid_labels, valid_loader, args)
 
         score = valid_metrics['f1 propeptides']
         writer.add_scalar('Valid/f1_propeptides', score, global_step=epoch)
@@ -613,7 +621,7 @@ def train(args, train_partitions=[0,1,2], valid_partitions=[3], test_partitions=
     _, test_probs, test_preds, _, test_labels = run_dataloader(
         test_loader, model, optimizer, writer, do_train=False)
 
-    test_metrics = score(test_probs, test_preds, test_labels, test_loader, args)
+    test_metrics = score_at_tolerances(test_probs, test_preds, test_labels, test_loader, args)
 
     pickle.dump((test_probs, test_preds, test_labels, test_loader.dataset.names),
                 open(os.path.join(args.out_dir, 'test_outputs.pickle'), 'wb'))
@@ -799,7 +807,7 @@ def train_nested_cv(args: argparse.Namespace) -> Dict:
             _, test_probs, test_preds, _, test_labels = run_dataloader(
                 test_loader, model, optimizer, writer, do_train=False,
             )
-            test_metrics = score(test_probs, test_preds, test_labels, test_loader, args)
+            test_metrics = score_at_tolerances(test_probs, test_preds, test_labels, test_loader, args)
             test_metrics['outer_fold'] = outer_fold
             test_metrics['inner_fold'] = inner_i
             outer_fold_test_metrics.append(test_metrics)
