@@ -49,3 +49,16 @@ events.out.tfevents*
 results/**/*.pickle
 results/**/model.pt
 results/**/*.pt
+
+# --- The rebuilt dataset is source, not output ---
+# The blanket *.csv / *.fasta / *.tsv / *.json rules above swallow data_v4/
+# entirely, exactly as they would have swallowed results/. The published data/
+# files escape only because they were tracked before those rules existed, which
+# is why this needs saying rather than being inferred from the fact that data/
+# works. A dataset that looks committed and is not is the worst failure mode
+# here: every number in COVERAGE.md is computed from these files.
+!data_v4/**/*.csv
+!data_v4/*.csv
+!data_v4/*.fasta
+!data_v4/*.tsv
+!data_v4/*.json
