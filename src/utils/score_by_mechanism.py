@@ -28,6 +28,7 @@ aggregated, which is what a replicate group needs.
 import argparse
 import collections
 import csv
+import inspect
 import io
 import os
 import pickle
@@ -39,6 +40,13 @@ import pandas as pd
 
 from .crf_label_utils import parse_coordinate_string
 from .manuscript_metrics import compute_all_metrics
+
+# `end_state` is an addition on the multimodal branches. This script is meant to
+# be droppable onto a checkout that predates it -- the whole point is to rescore
+# runs that already exist, wherever they live -- so detect the signature instead
+# of requiring the newer file. Without it the grammar is assumed to end at state
+# 50, which is correct for every published run.
+_HAS_END_STATE = 'end_state' in inspect.signature(compute_all_metrics).parameters
 
 STREAM = ('https://rest.uniprot.org/uniprotkb/stream'
           '?query=%28ft_propep%3A%2A%29%20AND%20%28reviewed%3Atrue%29'
@@ -96,11 +104,12 @@ def score_one(path, frame, keywords, tolerances, end_state):
         # so passing the full frame would silently score the whole test set.
         subset_names = np.asarray([names[i] for i in index])
         subset = frame.loc[subset_names]
+        extra = {'end_state': end_state} if _HAS_END_STATE else {}
         per_window = compute_all_metrics(
             [probs[i] for i in index] if isinstance(probs, list) else probs[index],
             [preds[i] for i in index],
             [labels[i] for i in index] if isinstance(labels, list) else labels[index],
-            subset_names, subset, windows=tolerances, end_state=end_state)
+            subset_names, subset, windows=tolerances, **extra)
         n_spans = int(sum(len(x) for x in subset['true_propeptides']))
         out[label] = {'n_proteins': len(index), 'n_spans': n_spans,
                       'metrics': dict(zip(tolerances, per_window))}
@@ -120,6 +129,13 @@ def main():
                              "with 50 returns TRUNCATED spans, not empty ones.")
     args = parser.parse_args()
     tolerances = [int(x) for x in args.tolerances.split(',')]
+    if not _HAS_END_STATE and args.end_state != 50:
+        raise SystemExit(
+            f'This checkout\'s compute_all_metrics has no end_state argument, so '
+            f'it can only score a 50-state grammar, but --end_state {args.end_state} '
+            'was given. Scoring a wider grammar here would silently truncate every '
+            'span. Update src/utils/manuscript_metrics.py from a multimodal branch '
+            'first.')
 
     frame = pd.read_csv(args.data_file, index_col='protein_id').fillna('')
     frame['true_propeptides'] = [parse_coordinate_string(x, merge_overlaps=True)
