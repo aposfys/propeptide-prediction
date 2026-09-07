@@ -1,16 +1,37 @@
 # ProstT5, sequence + 3Di — arm 3
 
-One of three arm branches for the propeptide comparison. **101 CRF states,
+One of three arm branches for the propeptide comparison. **51 CRF states,
 propeptide-only labels, the published dataset.**
 
 | | |
 |---|---|
 | representation | ProstT5 `Rostlab/ProstT5`, amino acids + Foldseek 3Di |
 | embedding dims | `--embedding_dim 1024` |
-| grammar | 101 states: background + propeptide positions 1–100 |
+| grammar | 51 states: background + propeptide positions 1–50 |
 | labels | two: none, propeptide |
 | data | `data/labeled_sequences.csv`, unchanged |
 | hyperparameters | T4, replayed from `results/esm2_rep1/config.json` |
+
+## Why 51 states and not 101
+
+The published model has 101 states, but they are **two branches of 50**: states
+1–50 are peptide positions 1–50, states 51–100 are *propeptide* positions 1–50.
+The propeptide half is 50 states and caps propeptide length at 50.
+
+So a propeptide-only model with 51 states already has **exactly** the original's
+propeptide capacity. Nothing was lost by dropping the peptide branch. Using 101
+states here would not be parity with the published model — it would double the
+propeptide branch beyond anything DeepPeptide had.
+
+On this dataset that extra half is unusable: every propeptide in the benchmark is
+5–50 residues, so states 51–100 would never be visited by a label, at 3.9× the
+decode cost. `MAX_LEN=100 bash run_arm.sh` runs the 101-state variant if you want
+it; the grammar ablation on `paper-3arm` measures what it costs.
+
+Coverage, for the record: the 5..50 window reaches 69.0% of non-CAAX propeptides
+in current UniProt and 64.2% of the convertase class. Widening to 100 would reach
+80.2% and 77.9% — but only with data that contains them, which this benchmark
+does not.
 
 ## The other two arms
 
