@@ -26,16 +26,22 @@ Embedder: `Rostlab/ProstT5`. 1024 dims per residue per language, so 1024 for
 
 ### Arms on this branch
 
-| arm | `--tracks` | dims | what it is |
+| arm | flags | dims | what it is |
 |---|---|---|---|
-| sequence-only | `aa` | 1024 | reproduces `prost5-propeptide` |
-| structure-only | `3di` | 1024 | how much of the task is structural |
-| both | `aa+3di` | 2048 | the treatment |
-| **shuffled control** | `aa+3di --shuffle_3di` | 2048 | same dims, same mask, wrong structures |
+| sequence-only | `--tracks aa` | 1024 | reproduces `prost5-propeptide` |
+| structure-only | `--tracks 3di` | 1024 | how much of the task is structural |
+| both | `--tracks aa+3di --fuse renorm` | 1024 | the treatment |
+| **shuffled control** | `… --fuse renorm --shuffle_3di` | 1024 | same architecture, same mask, wrong structures |
+| both, concatenated | `--tracks aa+3di --fuse concat` | 2048 | second experiment, widens `conv1` |
 
-The shuffled control is not optional. Going from 1024 to 2048 dims doubles what
-the head can use whether or not the extra half means anything, so a gain over the
-sequence-only arm does not by itself show that structure helped.
+**The architecture is unchanged.** At 1024 dims this branch builds a
+byte-identical model to `prost5-propeptide` — 51 CRF states, the same constraint
+mask, 192,369 trainable parameters — and `test_architecture.py` asserts it
+against values measured on the parent branch. Only `--fuse concat` changes
+anything, and it changes exactly one layer. See [FUSION.md](FUSION.md).
+
+The shuffled control is not optional either way. It is the only pair that
+separates structural information from the mere presence of a second channel.
 
 ### Also on this branch
 
