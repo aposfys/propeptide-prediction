@@ -7,6 +7,28 @@ python -m src.utils.build_dataset --out_dir data_v4 --max_len 100
 python -m src.utils.validate_dataset --data_dir data_v4 --max_len 100
 ```
 
+## Checked against the paper first
+
+Every figure the paper states is reproduced from the distributed files:
+
+| paper | value | recomputed |
+|---|---|---|
+| dataset after GraphPart | 7,623 proteins | 7,623 ✓ |
+| Table 1, peptides | 6,169 | 6,169 ✓ |
+| Table 1, propeptides | 7,359 | 7,359 ✓ |
+| Table 1, taxonomy sum | 531 + 7,092 | 7,623 ✓ |
+| "63% of propeptides fall in 5–50" | 63% | 64.4% ✓ |
+
+**Two conventions that matter.** The paper counts annotations **unmerged**, so
+overlapping alternative boundaries count separately. Merging gives 7,349 rather
+than 7,359, and every span figure below is unmerged to match.
+
+And the paper's 63% **counts CAAX tripeptides as propeptides**. On the same
+denominator I get 64.4%, which is the agreement. On the denominator used below —
+which excludes them — the same window covers 68.3%. The two figures are not in
+conflict; they count different things, and the difference is 781 annotations of a
+different reaction.
+
 ## The denominator
 
 **Reviewed UniProt, excluding viral proteins and fragments, carrying at least one
@@ -26,17 +48,25 @@ the sense of the task:
 
 ## The comparison
 
+Spans counted unmerged, as the paper does.
+
 | | proteins | of eligible | labelled spans | of eligible |
 |---|---|---|---|---|
-| published, as distributed | 7,213 | 66.1% | 8,201 | 63.6% |
-| **published, after GraphPart — what the model saw** | **6,392** | **58.6%** | **7,349** | **57.0%** |
-| **rebuilt, before GraphPart** | **8,516** | **78.0%** | **9,592** | **74.4%** |
-| rebuilt, at 90% retention (estimated) | 7,664 | 70.2% | 8,632 | 66.9% |
+| published, as distributed | 7,213 | 66.1% | 8,211 | 63.7% |
+| **published, after GraphPart — what the model saw** | **6,392** | **58.6%** | **7,359** | **57.1%** |
+| **rebuilt, before GraphPart** | **8,516** | **78.0%** | **9,615** | **74.6%** |
+| rebuilt, at 90% retention (estimated) | 7,664 | 70.2% | 8,653 | 67.1% |
 
-The row that matters for a like-for-like claim is the second against the fourth,
-since GraphPart has not yet run on the rebuilt file: **58.6% → 70.2% of proteins
-and 57.0% → 66.9% of spans**, about **+12 points** on each. The unpartitioned
-comparison is +11.9 and +10.8.
+The like-for-like claim is the second row against the fourth, since GraphPart has
+not yet run on the rebuilt file: **58.6% → 70.2% of proteins, +11.7 points, and
+57.1% → 67.1% of spans, +10.0 points.** The unpartitioned comparison is +11.9 and
++10.9, and needs no retention assumption.
+
+**The 90% is an estimate, not a measurement.** It is the rate GraphPart achieved
+on the published file, 7,623 of 8,449. If the rebuilt file retains 80% instead —
+plausible, since the added proteins skew toward protease families, which
+cluster — coverage lands near 62% rather than 70% and the gain shrinks to about
++4 points. Quote the unpartitioned row until GraphPart has run.
 
 Quote the post-GraphPart figure. The published 7,213 is not what the model was
 trained on; 826 rows are left unpartitioned and the loader drops them.
@@ -87,6 +117,6 @@ different reaction, or unreviewed.
 
 > Rebuilding the benchmark under the published protocol with the length window
 > widened from 5–50 to 5–100 residues raises coverage of curated propeptides from
-> 58.6% to 70.2% of eligible proteins and from 57.0% to 66.9% of annotated spans,
+> 66.1% to 78.0% of eligible proteins and from 63.7% to 74.6% of annotated spans,
 > and removes 680 propeptides that the published labels leave annotated as
 > background.
