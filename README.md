@@ -1,94 +1,80 @@
-# DeepPeptide (ESM3, multimodal) — propeptide cleavage prediction
-Propeptide-only CRF over ESM3 embeddings (`esm3_sm_open_v1`, 1536-dim), adapted from
-[DeepPeptide](https://github.com/fteufel/DeepPeptide) (Teufel et al., *Bioinformatics* 2023).
+# ESM3, sequence + structure — arm 2
 
-`esm3-propeptide` with the structure conditioning turned into a powered experiment
-rather than a single pair of runs.
+One of three arm branches for the propeptide comparison. **101 CRF states,
+propeptide-only labels, the published dataset.**
 
-ESM3 is natively multimodal — sequence, backbone coordinates, VQ-VAE structure
-tokens, SASA and ss8 are all input tracks. The reported ESM3 numbers used the
-sequence track alone. The existing structure result is one run against one run
-(−0.0568 F1, entirely in recall) against a ±0.0409 replicate band, which is why
-RESULTS.md files it under *suggestive, not established*.
+| | |
+|---|---|
+| representation | ESM3 `esm3_sm_open_v1`, sequence + coordinates + structure tokens + SASA |
+| embedding dims | `--embedding_dim 1536` |
+| grammar | 101 states: background + propeptide positions 1–100 |
+| labels | two: none, propeptide |
+| data | `data/labeled_sequences.csv`, unchanged |
+| hyperparameters | T4, replayed from `results/esm2_rep1/config.json` |
 
-**Nothing new has been run on this branch.** It adds the per-pathway controls, the
-negative control, the dual-tolerance reporting and the run plan. The design, the
-power calculation and the reading order are in [NEXT_STEPS.md](NEXT_STEPS.md).
+## The other two arms
 
-### Structural arms
+| branch | representation |
+|---|---|
+| [`esm2-101`](../../tree/esm2-101) | ESM-2, sequence only — **the baseline** |
+| [`esm3-101`](../../tree/esm3-101) | ESM3, sequence + structure tracks |
+| [`prost5-101`](../../tree/prost5-101) | ProstT5, sequence + 3Di |
 
-| arm | flags | what it isolates |
-|---|---|---|
-| sequence-only | `--no_structure` | the same code path with tracks masked |
-| all tracks | *(none)* | the treatment |
-| tokens only | `--no_coords` | the VQ-VAE pathway |
-| geometry only | `--no_struct_tokens` | Geometric Attention |
-| **scrambled control** | `--scramble_structure` | tracks present, residue axis permuted, no true fold |
-
-The scrambled control is the one that matters. ESM3 keeps 1536 dims whatever it
-is fed, so the structure contrast is not confounded by dimensionality — but it is
-still confounded by "having a second track at all", and only the control
-separates that from geometry.
-
-**The architecture is unchanged, for every arm.** Structure enters through
-ESM3's own conditioning rather than by widening the input, so all five arms
-build a byte-identical model to `esm3-propeptide` — 51 CRF states, the same
-constraint mask, 241,521 trainable parameters. `test_architecture.py` asserts it
-against values measured on the parent branch:
+**The training core is byte-identical across all three.** `train_loop_crf.py`,
+`crf_models.py`, `dataset.py`, `manuscript_metrics.py`, `crf_label_utils.py`
+and `run.py` are the same blobs on every branch, so a difference in F1 is a
+difference in the representation and nothing else. Check it:
 
 ```bash
-python test_architecture.py
+python test_core_identical.py
 ```
 
-Passing `--max_peptide_len 50 --min_peptide_len 5` explicitly builds the same
-model as passing nothing, which is what makes the grammar flags safe to have.
+That check exists because it has already gone wrong: before the arms were split,
+`esm3-multimodal` and `prost5-multimodal` differed in four of those files, and
+`RESULTS.md` warns against comparing F1 across branches for that reason.
 
-The consolidated ESM3 branch also keeps: sequence-only and structure-conditioned
-extractors, LoRA fine-tuning, the Optuna nested-CV search, ensembling and the
-analysis tooling.
+## Running this arm
 
-> **⚠ ESM3 embeddings made before 2026-08-19 are mis-scaled by ~840× and every result
-> from them is invalid.** They can be repaired without re-running ESM3, and `preflight.py`
-> refuses to start on them. See [EMBEDDINGS.md](EMBEDDINGS.md).
+First fetch structures and extract, then train:
 
-### Also new here
-
-- **Both boundary tolerances are scored.** Every run writes `f1 propeptides@1`
-  and `f1 propeptides@3` to `test_metrics.json`. The unsuffixed
-  `f1 propeptides` key still holds ±3 and model selection still uses ±3, so
-  every number in [RESULTS.md](RESULTS.md) stays valid and comparable.
-- **`valid_metrics.json` is written on the single-run path.** RESULTS.md notes
-  that 68 of 84 finished runs have no auditable record of which epoch was
-  selected. Fixed.
-- **The CRF grammar is configurable** via `--min_peptide_len` /
-  `--max_peptide_len`, defaulting to the published 5..50 window.
-  [GRAMMAR.md](GRAMMAR.md) measures what that window covers in UniProt and what
-  widening it would cost; `test_grammar.py` asserts the defaults reproduce the
-  published grammar exactly.
-
-### Before you run this
-This code accompanies an MSc thesis. **If you intend to run it, please contact me first**
-— apostolosfysekidis1@gmail.com. The trained weights and search outputs are not published
-here and are available on request. MIT licensed, so this is a request, not a condition.
-
-### Quick start
 ```bash
-conda create -n deeppeptide python=3.10 -y && conda activate deeppeptide
-pip install -r requirements.txt          # needs a CUDA torch build
-
-bash run_optuna_gpu.sh --fold 0 \
-    --embeddings_dir /path/to/embeddings/esm3_normed \
-    --out_dir results/esm3_prop_optuna_normed     # --out_dir MUST be new
-
-python summarize_optuna.py --out_dir results/esm3_prop_optuna_normed
+python -m src.utils.fetch_afdb_structures --out_dir structures/
+python -m src.utils.make_embeddings_esm3_struct \\
+    --structures_dir structures/ --out_dir embeddings/esm3_struct \\
+    --gpu_max_len 2000 --max_struct_len 1024
 ```
-`run_optuna_gpu.sh` runs `preflight.py` itself and aborts if it fails.
 
-### Documentation
-- [TRAINING.md](TRAINING.md) — what you need, choosing a protocol, options, output
-- [EMBEDDINGS.md](EMBEDDINGS.md) — the embedding scaling bug and how to repair it
-- [OPTUNA_GPU.md](OPTUNA_GPU.md) — the search space, where it comes from, and its cost
-- [EXPERIMENT.md](EXPERIMENT.md) — the protocol governing every arm of the comparison
-- [RESULTS.md](RESULTS.md) — measured results
-- [CHANGELOG.md](CHANGELOG.md) — what differs from the original DeepPeptide
-- [predictor/README.md](predictor/README.md) — inference with the pretrained model
+Its own sequence-only control at 101 states is required, or this arm reads only
+as a loss to the baseline:
+
+```bash
+python -m src.utils.make_embeddings_esm3_struct \\
+    --structures_dir structures/ --out_dir embeddings/esm3_seqonly --no_structure
+```
+
+`--scramble_structure` is the negative control: tracks present, residue axis
+permuted, no true fold.
+
+```bash
+ARM=esm3_struct EMB=embeddings/esm3_struct DIM=1536 bash run_arm.sh 8
+```
+
+Prefix with `DRY_RUN=1` to print the commands without running them. Existing
+output directories are skipped, so a partial batch can be resumed.
+
+Then:
+
+```bash
+python -m src.utils.summarize_results results/
+```
+
+## Before trusting anything from here
+
+```bash
+python test_architecture.py     # the head is the published one
+python test_grammar.py          # the grammar does what it claims
+python test_training_smoke.py   # the loop runs at 51 and 101 states
+python test_core_identical.py   # the three arms share a training core
+```
+
+The plan, its gates and what each result would mean are in [PLAN.md](PLAN.md).
