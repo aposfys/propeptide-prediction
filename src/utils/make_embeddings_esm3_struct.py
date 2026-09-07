@@ -155,7 +155,9 @@ def _parse_layers(args) -> list:
 
 def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bool,
              use_sasa: bool, use_plddt: bool, use_ss8: bool, limit: int,
-             max_struct_len: int = 0, gpu_max_len: int = 0, layers: list | None = None) -> None:
+             max_struct_len: int = 0, gpu_max_len: int = 0, layers: list | None = None,
+             use_coords: bool = True, use_struct_tokens: bool = True,
+             scramble: bool = False, scramble_seed: int = 42) -> None:
     from esm.models.esm3 import ESM3
     from esm.sdk.api import ESMProtein
 
@@ -164,7 +166,10 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
     # remembering the command line -- the same lesson as config.json:label_type.
     json.dump(
         {'no_structure': no_structure, 'use_sasa': use_sasa, 'use_plddt': use_plddt,
-         'use_ss8': use_ss8, 'max_struct_len': max_struct_len,
+         'use_ss8': use_ss8, 'use_coords': use_coords,
+         'use_struct_tokens': use_struct_tokens, 'scramble': scramble,
+         'scramble_seed': scramble_seed if scramble else None,
+         'max_struct_len': max_struct_len,
          'gpu_max_len': gpu_max_len, 'layers': layers,
          'structures_dir': structures_dir, 'data_file': data_file},
         open(os.path.join(out_dir, 'extraction_config.json'), 'w'), indent=2,
@@ -338,6 +343,33 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
                 plddt = None
             else:
                 coords, sasa, plddt, ss8 = loaded
+                if scramble:
+                    # NEGATIVE CONTROL. Permute the residue axis of every
+                    # structural track by the same permutation, so the tracks
+                    # stay consistent with each other and only their
+                    # correspondence to the sequence is destroyed. Each residue
+                    # keeps its own local atom geometry and is placed at another
+                    # residue's position: a well-formed input the encoder will
+                    # happily tokenise, carrying no true fold.
+                    #
+                    # This is what separates "structure helped" from "having any
+                    # second track helped". Without it, a gain over sequence-only
+                    # is also consistent with the extra tracks acting as a
+                    # length-correlated nuisance feature the head can exploit.
+                    #
+                    # Seeded per sequence hash, so the control is reproducible
+                    # and every protein gets a different permutation.
+                    generator = torch.Generator().manual_seed(
+                        scramble_seed + int(h[:8], 16))
+                    order = torch.randperm(coords.shape[0], generator=generator)
+                    coords = coords[order]
+                    if sasa is not None:
+                        sasa = [sasa[i] for i in order.tolist()]
+                    if ss8 is not None:
+                        ss8 = ''.join(ss8[i] for i in order.tolist())
+                    if plddt is not None:
+                        plddt = plddt[order]
+                    stats['scrambled'] += 1
                 protein = ESMProtein(
                     sequence=seq,
                     coordinates=coords,
@@ -361,10 +393,28 @@ def generate(data_file: str, structures_dir: str, out_dir: str, no_structure: bo
             # `coordinates` -> structure_coords feeds Geometric Attention, which
             # is a separate pathway from the embedded structure tokens. Passing
             # tokens alone skips it and loses the fine-grained 3D conditioning.
-            for field, arg in (('coordinates', 'structure_coords'),
-                               ('structure', 'structure_tokens'),
-                               ('sasa', 'sasa_tokens'),
-                               ('secondary_structure', 'ss8_tokens')):
+            # ESM3 has TWO independent structural pathways and they can be fed
+            # separately. Coordinates go to Geometric Attention (fine-grained,
+            # input-only); structure tokens are the VQ-VAE quantisation (coarse,
+            # normally an output). The combined run in RESULTS.md fed both, so it
+            # cannot say which one carries an effect -- --no_coords and
+            # --no_struct_tokens split them.
+            #
+            # Worth knowing before interpreting --no_coords: on SEQUENCE-ONLY
+            # input, extracting with Geometric Attention enabled and disabled
+            # gives bit-identical output (max |difference| = 0.0, RESULTS.md).
+            # So any difference this flag makes is genuinely the coordinates,
+            # not the block's presence.
+            track_fields = [('coordinates', 'structure_coords'),
+                            ('structure', 'structure_tokens'),
+                            ('sasa', 'sasa_tokens'),
+                            ('secondary_structure', 'ss8_tokens')]
+            if not use_coords:
+                track_fields = [t for t in track_fields if t[1] != 'structure_coords']
+            if not use_struct_tokens:
+                track_fields = [t for t in track_fields if t[1] != 'structure_tokens']
+
+            for field, arg in track_fields:
                 tok = getattr(encoded, field, None)
                 if tok is not None:
                     kwargs[arg] = tok.unsqueeze(0).to(dev)
@@ -453,6 +503,24 @@ def main():
                         'track masked. Isolates the track contribution from any '
                         'other difference between this script and the original.')
     p.add_argument('--no_sasa', action='store_true', help='Disable the SASA track.')
+    p.add_argument('--no_coords', action='store_true',
+                   help='Drop structure_coords, keeping the structure tokens. '
+                        'Isolates the VQ-VAE token pathway from Geometric '
+                        'Attention, which the combined run could not separate.')
+    p.add_argument('--no_struct_tokens', action='store_true',
+                   help='Drop structure_tokens, keeping the coordinates. The '
+                        'complement of --no_coords: Geometric Attention alone.')
+    p.add_argument('--scramble_structure', action='store_true',
+                   help='NEGATIVE CONTROL. Permute the residue axis of every '
+                        'structural track, so the tracks are present and '
+                        'well-formed but carry no true fold. A structure effect '
+                        'has to beat this, not just the sequence-only arm -- '
+                        'otherwise it is consistent with the tracks acting as a '
+                        'nuisance feature rather than as geometry.')
+    p.add_argument('--scramble_seed', type=int, default=42,
+                   help='Seed for --scramble_structure, mixed with each sequence '
+                        'hash so every protein gets its own permutation. '
+                        'Recorded in extraction_config.json.')
     p.add_argument('--plddt', action='store_true',
                    help='Feed real per-residue pLDDT. OFF by default: the ESM3 '
                         'paper states the pLDDT tracks are used during '
@@ -501,9 +569,19 @@ def main():
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+    if args.no_coords and args.no_struct_tokens and not args.no_structure:
+        raise SystemExit(
+            'Dropping both structural pathways leaves only SASA/ss8. If that is '
+            'what you want, say so explicitly with --no_coords '
+            '--no_struct_tokens --no_sasa off; if you meant the sequence-only '
+            'baseline, use --no_structure.')
+
     generate(args.data_file, args.structures_dir, args.out_dir, args.no_structure,
              not args.no_sasa, args.plddt, args.ss8, args.limit, args.max_struct_len,
-             args.gpu_max_len, _parse_layers(args))
+             args.gpu_max_len, _parse_layers(args),
+             use_coords=not args.no_coords,
+             use_struct_tokens=not args.no_struct_tokens,
+             scramble=args.scramble_structure, scramble_seed=args.scramble_seed)
 
 
 if __name__ == '__main__':
