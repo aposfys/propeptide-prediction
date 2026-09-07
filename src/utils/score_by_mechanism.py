@@ -108,8 +108,20 @@ def load_mechanisms(table_path, cache_path, refresh):
 # statement about how THIS protein's propeptide is removed, so it wins.
 # "unassigned" is honestly unassigned -- only about 28% of 5-50 features carry
 # the dibasic keyword -- and must not be read as a fourth mechanism.
-def mechanism(accession, table):
-    return table.get(accession, 'not in current UniProt')
+def mechanism(accession, table, has_label):
+    '''Mechanism for a protein, or why it has none.
+
+    The two ways of having no mechanism are NOT the same thing and must not share
+    a row. A protein the benchmark labels negative has no propeptide to classify
+    and contributes only false positives; a protein whose annotation UniProt has
+    since withdrawn had one in 2022 and does not now. Pooling them produced a
+    "not in current UniProt: n=138, spans=2" row whose F1 of 0.0000 meant
+    nothing, because 136 of those 138 were simply negatives.
+    '''
+    label = table.get(accession)
+    if label is not None:
+        return label
+    return 'annotation withdrawn' if has_label else 'negative (no propeptide)'
 
 
 def score_one(path, frame, table, tolerances, end_state):
@@ -118,7 +130,10 @@ def score_one(path, frame, table, tolerances, end_state):
     names = list(names)
     groups = collections.defaultdict(list)
     for i, name in enumerate(names):
-        groups[mechanism(str(name), table)].append(i)
+        accession = str(name)
+        has_label = bool(len(frame.loc[accession, 'true_propeptides'])) \
+            if accession in frame.index else False
+        groups[mechanism(accession, table, has_label)].append(i)
 
     out = {}
     for label, index in sorted(groups.items()):
@@ -134,6 +149,9 @@ def score_one(path, frame, table, tolerances, end_state):
             [labels[i] for i in index] if isinstance(labels, list) else labels[index],
             subset_names, subset, windows=tolerances, **extra)
         n_spans = int(sum(len(x) for x in subset['true_propeptides']))
+        # A group with no true spans has no recall to report; whatever the model
+        # predicts there is a false positive by construction. F1 is 0 or
+        # undefined and printing it as a score invites misreading.
         out[label] = {'n_proteins': len(index), 'n_spans': n_spans,
                       'metrics': dict(zip(tolerances, per_window))}
     return out
@@ -176,6 +194,10 @@ def main():
         per_run[path] = score_one(path, frame, table, tolerances, args.end_state)
         print(f'\n=== {path} ===')
         for label, entry in per_run[path].items():
+            if entry['n_spans'] == 0:
+                fp = ' (no true spans: F1 is undefined, only false positives possible)'
+                print(f'  {label:24} n={entry["n_proteins"]:5} spans={entry["n_spans"]:5}{fp}')
+                continue
             row = ' '.join(
                 f'F1@{t}={entry["metrics"][t]["f1 propeptides"]:.4f}' for t in tolerances)
             print(f'  {label:24} n={entry["n_proteins"]:5} spans={entry["n_spans"]:5}  {row}')
@@ -184,6 +206,8 @@ def main():
         print(f'\n=== aggregate over {len(per_run)} runs (mean, sd) ===')
         labels = sorted({k for r in per_run.values() for k in r})
         for label in labels:
+            if all(r[label]['n_spans'] == 0 for r in per_run.values() if label in r):
+                continue
             for t in tolerances:
                 values = [r[label]['metrics'][t]['f1 propeptides']
                           for r in per_run.values() if label in r]
