@@ -30,6 +30,19 @@ is fed, so the structure contrast is not confounded by dimensionality — but it
 still confounded by "having a second track at all", and only the control
 separates that from geometry.
 
+**The architecture is unchanged, for every arm.** Structure enters through
+ESM3's own conditioning rather than by widening the input, so all five arms
+build a byte-identical model to `esm3-propeptide` — 51 CRF states, the same
+constraint mask, 241,521 trainable parameters. `test_architecture.py` asserts it
+against values measured on the parent branch:
+
+```bash
+python test_architecture.py
+```
+
+Passing `--max_peptide_len 50 --min_peptide_len 5` explicitly builds the same
+model as passing nothing, which is what makes the grammar flags safe to have.
+
 The consolidated ESM3 branch also keeps: sequence-only and structure-conditioned
 extractors, LoRA fine-tuning, the Optuna nested-CV search, ensembling and the
 analysis tooling.
