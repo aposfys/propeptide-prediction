@@ -1,0 +1,34 @@
+{
+  "min_len": 5,
+  "max_len": 100,
+  "max_negatives": null,
+  "seed": null,
+  "states_required": 101,
+  "filters": [
+    "reviewed",
+    "no fragments",
+    "no viruses",
+    "all propeptide spans 5..100",
+    "CAAX spans dropped, their proteins kept"
+  ],
+  "counts": {
+    "viral": 542,
+    "caax_spans_dropped": 781,
+    "positives": 8516,
+    "no_usable_propeptide": 1492,
+    "span_out_of_range": 2396,
+    "fragment": 1042,
+    "sorting_signal_dropped": 293,
+    "peptide_covers_whole_chain": 3952,
+    "negatives": 1243,
+    "context_negatives": 413
+  },
+  "n_rows": 9759,
+  "mechanism_counts": {
+    "unassigned": 4981,
+    "convertase": 2068,
+    "zymogen_protease": 1467,
+    "negative": 830,
+    "negative_context": 413
+  }
+}
