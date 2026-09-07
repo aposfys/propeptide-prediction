@@ -248,10 +248,29 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
+    # Header format copied from the distributed FASTA, which reads
+    #   >P01211|organism=Other|motif_cluster=13
+    # GraphPart balances partitions on a label taken from the header, and the
+    # original balanced on motif_cluster -- a 50-class clustering of PEPTIDE
+    # motifs. That label cannot be reproduced (the clustering is not in the
+    # repository) and would be the wrong one anyway: this is a propeptide-only
+    # dataset, and motif_cluster describes mature peptides.
+    #
+    # So the mechanism label is used instead. It is the relevant stratification
+    # here, and balancing on it keeps convertase, zymogen and negative proteins
+    # evenly represented across partitions rather than letting a whole class land
+    # in the test fold.
+    #
+    # The SEPARATION is unaffected by this choice: GraphPart's threshold forbids
+    # >30% identity across partitions whatever it balances on. Only which
+    # sequence lands where, and which are removed, depends on the label.
     fasta_path = os.path.join(args.out_dir, 'protein_sequences.fasta')
     with open(fasta_path, 'w') as handle:
         for row in rows:
-            handle.write(f">{row['protein_id']}\n{row['sequence']}\n")
+            organism = (row['organism'] or 'Other').replace('|', ' ')
+            handle.write(f">{row['protein_id']}|organism={organism}"
+                         f"|mechanism={mechanisms[row['protein_id']]}\n"
+                         f"{row['sequence']}\n")
 
     with open(os.path.join(args.out_dir, 'propeptide_mechanism.tsv'), 'w') as handle:
         handle.write('accession\tmechanism\n')
@@ -275,11 +294,20 @@ def main():
     print('\n  mechanisms:', dict(collections.Counter(mechanisms.values())))
     print(f'\n  train with --max_peptide_len {args.max_len} '
           f'({args.max_len + 1} states)')
-    print('\nNEXT, AND NOT OPTIONAL — homology-partition it:')
-    print(f'  graphpart needle -ff {fasta_path} -th 0.3 -pa 5 \\')
+    print('\nNEXT, AND NOT OPTIONAL — homology-partition it.')
+    print('These separation settings are the published ones and must not change:')
+    print('needle (Needleman-Wunsch), 30% identity, 5 partitions. Switching to')
+    print('the mmseqs2 backend would compare a different set of pairs and remove')
+    print('a different set of sequences.\n')
+    print(f'  graphpart needle -ff {fasta_path} \\')
+    print(f'      -th 0.3 -pa 5 -ln mechanism \\')
     print(f'      -on {os.path.join(args.out_dir, "graphpart_assignments.csv")}')
-    print('  Numbers from an unpartitioned split are optimistic and not '
-          'comparable to anything.')
+    print('\n  -ln mechanism balances the classes across partitions. The original')
+    print('  balanced on motif_cluster, a clustering of PEPTIDE motifs that is not')
+    print('  in the repository and describes the wrong thing for a propeptide-only')
+    print('  dataset. The separation guarantee does not depend on the label.')
+    print('\n  Numbers from an unpartitioned split are optimistic and comparable')
+    print('  to nothing.')
 
 
 if __name__ == '__main__':

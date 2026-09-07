@@ -107,13 +107,42 @@ arm fails.
 
 ```bash
 python -m src.utils.build_dataset --out_dir data_v2
-graphpart needle -ff data_v2/protein_sequences.fasta -th 0.3 -pa 5 \
+graphpart needle -ff data_v2/protein_sequences.fasta \
+    -th 0.3 -pa 5 -ln mechanism \
     -on data_v2/graphpart_assignments.csv
 ```
 
-**Gate.** GraphPart must retain ≥85%. The distributed benchmark retained 90%
-(7,623 of 8,449). A much lower rate means the added proteins are homologous
-clumps and the partitions are unbalanced; report the retention either way.
+**The separation settings are the published ones and do not change:** `needle`
+(Needleman–Wunsch), 30% identity, 5 partitions. Reverse-engineered from the
+distributed files, not guessed — the assignment file carries GraphPart's own
+`label-val` and `between_connectivity` columns, and every
+`between_connectivity` is 0, meaning the partitions are fully separated at the
+threshold.
+
+**An earlier version of this plan said to use the mmseqs2 backend for speed.
+That was wrong.** A different backend compares a different set of pairs and
+removes a different set of sequences, so the separation would not be the
+original's. It is also unnecessary: the distributed FASTA has 14,583 records
+(one per peptide) against 13,581 here (one per protein), so the alignment load
+is comparable, not larger.
+
+**On the balancing label.** The original balanced on `motif_cluster`, visible in
+its FASTA headers as `>P01211|organism=Other|motif_cluster=13` — a 50-class
+clustering of *peptide* motifs. It is not in the repository and cannot be
+recomputed, and it describes mature peptides, which is the wrong thing for a
+propeptide-only dataset. `build_dataset.py` writes `mechanism` into the header
+instead, so `-ln mechanism` keeps convertase, zymogen, unassigned and negative
+proteins evenly spread rather than letting a class land in one fold.
+
+**This does not weaken the separation.** GraphPart's threshold forbids >30%
+identity across partitions whatever it balances on; the label only affects which
+sequence lands where and which are removed.
+
+**Gate.** Retention ≥85%, and `between_connectivity` must be 0 for every row, as
+it is in the original. The distributed benchmark retained 90% (7,623 of 8,449).
+A much lower rate means the added proteins are homologous clumps; report the
+retention either way. Also check that the 587 duplicate sequences did not
+straddle a partition.
 
 ### Step 1b — finish the grammar ablation · 6 runs · IN FLIGHT
 
