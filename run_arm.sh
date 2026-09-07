@@ -14,7 +14,8 @@
 set -euo pipefail
 
 N_REPS="${1:-8}"
-MAX_LEN="${MAX_LEN:-100}"
+MAX_LEN="${MAX_LEN:-50}"   # 51 states: the original propeptide capacity.
+                           # MAX_LEN=100 gives the 101-state variant.
 REFERENCE="${REFERENCE:-results/esm2_rep1/config.json}"
 : "${ARM:?set ARM, e.g. ARM=esm3_struct}"
 : "${EMB:?set EMB to the embeddings directory}"
